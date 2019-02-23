@@ -1,0 +1,9 @@
+[package]
+name = "minelaunch"
+version = "0.1.0"
+authors = ["Robert Fuchs <robertfuchsyoshi@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+serde_json = "1.0"
+flate2 = "1.0"
