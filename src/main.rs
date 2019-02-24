@@ -2,11 +2,13 @@ extern crate reqwest;
 extern crate tempfile;
 extern crate flate2;
 extern crate tar;
+extern crate walkdir;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
 use tempfile::tempdir;
 use reqwest::header;
+use walkdir::WalkDir;
 use std::path::Path;
 use std::fs;
 
@@ -62,8 +64,19 @@ fn download_java(save_path: &str) {
         fs::create_dir_all(&format!("{0}/runtime/", save_path)).unwrap();
     }
     if get_os() == "windows" {
-        // fs::rename doesn't work across drive letters, must fix
-        fs::rename(extract_dir.path().join("jre1.8.0_201"), runtime_dir).unwrap();
+        // fs::rename doesn't work across drive letters, so I manually copy every file to move the folder
+        // Don't need to worry about deleting the files because they're in a tempdir that gets automatically removed
+        fs::create_dir(&runtime_dir).unwrap();
+        for entry in WalkDir::new(extract_dir.path().join("jre1.8.0_201")).min_depth(1) {
+            let entry = entry.unwrap();
+            let unprefixed_entry = entry.path().strip_prefix(extract_dir.path().join("jre1.8.0_201")).unwrap();
+            if entry.path().is_dir() {
+                fs::create_dir(Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
+            }
+            else if entry.path().is_file() {
+                fs::copy(entry.path(), Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
+            }
+        }
     }
     else if get_os() == "macos" {
         // Mac OS X has a weird JRE file structure compared to Windows/Linux
@@ -84,7 +97,7 @@ fn get_os() -> &'static str {
         "linux"
     } else {
         panic!("unsupported operating system!");
-   }
+    }
 }
 
 fn get_arch() -> &'static str {
