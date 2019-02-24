@@ -3,6 +3,8 @@ extern crate tempfile;
 extern crate flate2;
 extern crate tar;
 extern crate walkdir;
+extern crate serde;
+extern crate serde_json;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -10,7 +12,33 @@ use tempfile::tempdir;
 use reqwest::header;
 use walkdir::WalkDir;
 use std::path::Path;
-use std::fs;
+use std::{fs, io};
+use std::io::Write;
+use serde::{Deserialize, Serialize};
+
+
+#[derive(Serialize, Deserialize)]
+struct MinecraftLatestVersions {
+    release: String,
+    snapshot: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MinecraftVersion {
+    id: String,
+    #[serde(rename="type")]
+    version_type: String,
+    url: String,
+    time: String,
+    #[serde(rename="releaseTime")]
+    release_time: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MinecraftVersionList {
+    latest: MinecraftLatestVersions,
+    versions: Vec<MinecraftVersion>,
+}
 
 fn main() {
     let minecraft_path = ".";
@@ -19,6 +47,30 @@ fn main() {
     if !Path::new(&format!("{0}/runtime/{1}-{2}/", minecraft_path, get_os(), get_arch())).exists() {
         println!("Java installation not found");
         download_java(minecraft_path);
+    }
+
+    // Get list of Minecraft versions
+    let mut minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest.json").unwrap();
+    let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_response.text().unwrap()).unwrap();
+
+    // Display list of versions for user to pick
+    println!("Available versions:");
+    let version_list = minecraft_versions.versions.iter().filter(|v| v.version_type == "release").collect::<Vec<&MinecraftVersion>>();
+    for (n, version) in version_list.iter().enumerate() {
+        println!("{0}. {1}", n+1, version.id);
+    }
+    print!("Which version would you like to play (use the number in front): ");
+    let mut version_select_str = String::new();
+    let mut version_num = 0;
+    while version_num == 0 {
+        io::stdout().flush().unwrap();
+        version_select_str.clear();
+        io::stdin().read_line(&mut version_select_str).unwrap();
+        match version_select_str.trim().parse::<usize>() {
+            Ok(n) if n > 0 && n <= version_list.len() => version_num = n,
+            Ok(_) => print!("That's not a listed version. Try again: "),
+            Err(_) => print!("That's not a number. Try again: "),
+        }
     }
 }
 
