@@ -5,8 +5,10 @@ extern crate tar;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
+use tempfile::tempdir;
 use reqwest::header;
 use std::path::Path;
+use std::fs;
 
 fn main() {
     let minecraft_path = ".";
@@ -47,11 +49,29 @@ fn download_java(save_path: &str) {
         .send()
         .unwrap();
 
-    // Extract Java runtime to "{save-path}/runtime/{os}-{arch}/"
+    // Extract Java runtime to tempdir
     println!("Extracting Java");
     let mut archive = Archive::new(GzDecoder::new(response));
-    let extract_path = format!("{0}/runtime/{1}-{2}/", save_path, get_os(), get_arch());
-    archive.unpack(extract_path).unwrap();
+    let extract_dir = tempdir().unwrap();
+    archive.unpack(extract_dir.path()).unwrap();
+
+    // Move JRE directory to "{save-path}/runtime/{os}-{arch}/"
+    let runtime_dir = format!("{0}/runtime/{1}-{2}/", save_path, get_os(), get_arch());
+    // Create runtime folder if it doesn't exist
+    if !Path::new(&format!("{0}/runtime/", save_path)).exists() {
+        fs::create_dir_all(&format!("{0}/runtime/", save_path)).unwrap();
+    }
+    if get_os() == "windows" {
+        // fs::rename doesn't work across drive letters, must fix
+        fs::rename(extract_dir.path().join("jre1.8.0_201"), runtime_dir).unwrap();
+    }
+    else if get_os() == "macos" {
+        // Mac OS X has a weird JRE file structure compared to Windows/Linux
+        fs::rename(extract_dir.path().join("jre1.8.0_201.jre/Contents/Home"), runtime_dir).unwrap();
+    }
+    else if get_os() == "linux" {
+        fs::rename(extract_dir.path().join("jre1.8.0_201"), runtime_dir).unwrap();
+    }
     println!("Java extracted to runtime/{0}-{1}/", get_os(), get_arch());
 }
 
@@ -64,7 +84,7 @@ fn get_os() -> &'static str {
         "linux"
     } else {
         panic!("unsupported operating system!");
-    }
+   }
 }
 
 fn get_arch() -> &'static str {

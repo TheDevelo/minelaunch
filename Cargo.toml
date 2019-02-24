@@ -1,6 +1,6 @@
 [package]
 name = "minelaunch"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Robert Fuchs <robertfuchsyoshi@gmail.com>"]
 edition = "2018"
 
