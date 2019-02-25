@@ -16,7 +16,8 @@ use std::{fs, io};
 use std::io::Write;
 use serde::{Deserialize, Serialize};
 
-
+// TODO: Move all these types to their own file where it won't clutter everything
+// Types for version list JSON
 #[derive(Serialize, Deserialize)]
 struct MinecraftLatestVersions {
     release: String,
@@ -38,6 +39,63 @@ struct MinecraftVersion {
 struct MinecraftVersionList {
     latest: MinecraftLatestVersions,
     versions: Vec<MinecraftVersion>,
+}
+
+// Types for version spec JSON
+// Honestly these types are pretty complex and I don't need them right now so I'll leave them blank
+#[derive(Serialize, Deserialize)]
+struct DynamicArgument {
+}
+
+#[derive(Serialize, Deserialize)]
+enum Argument {
+    Static(String),
+    Dynamic(DynamicArgument),
+}
+
+#[derive(Serialize, Deserialize)]
+struct VersionArguments {
+    game: Vec<Argument>,
+    jvm: Vec<Argument>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VersionAssets {
+}
+
+#[derive(Serialize, Deserialize)]
+struct Download {
+    sha1: String,
+    size: u32,
+    url: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct VersionDownloads {
+    client: Download,
+    // Server doesn't exist for versions before 1.2.5
+    server: Option<Download>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Library {
+}
+
+// TODO: Properly fill out the entire spec struct
+#[derive(Serialize, Deserialize)]
+struct VersionSpec {
+    // Commented out because I have no clue how to make this work right now and it's not necessary
+    // arguments: VersionArguments,
+    #[serde(rename="assetIndex")]
+    asset_index: VersionAssets,
+    assets: String,
+    downloads: VersionDownloads,
+    id: String,
+    libraries: Vec<Library>,
+    #[serde(rename="mainClass")]
+    main_class: String,
+    #[serde(rename="minimumLauncherVersion")]
+    minimum_launcher_version: u8,
 }
 
 fn main() {
@@ -72,6 +130,24 @@ fn main() {
             Err(_) => print!("That's not a number. Try again: "),
         }
     }
+
+    // Check for whether selected version is installed
+    let version = version_list[version_num - 1];
+    if !Path::new(&format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id)).exists() {
+        println!("Minecraft {0} not found", version.id);
+        download_minecraft_version(minecraft_path, version);
+    }
+
+    // Check for necessary libraries
+    // TODO later
+
+    // Check for necessary assets
+    // TODO later
+
+    // Launch Minecraft
+    // TODO later
+    println!("Launching Minecraft {0}", version.id);
+    launch_minecraft_version(minecraft_path, version);
 }
 
 fn download_java(save_path: &str) {
@@ -138,6 +214,37 @@ fn download_java(save_path: &str) {
         fs::rename(extract_dir.path().join("jre1.8.0_201"), runtime_dir).unwrap();
     }
     println!("Java extracted to runtime/{0}-{1}/", get_os(), get_arch());
+}
+
+fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) {
+    // Create version folder if it doesn't exist
+    if !Path::new(&format!("{0}/versions/{1}/", minecraft_path, version.id)).exists() {
+        fs::create_dir_all(&format!("{0}/versions/{1}", minecraft_path, version.id)).unwrap();
+    }
+
+    // Download Minecraft version spec
+    println!("Downloading Minecraft version spec");
+    let mut version_spec_response = reqwest::get(&version.url).unwrap();
+    let version_spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
+    let mut version_spec_file = fs::File::create(&version_spec_path).unwrap();
+    // Copy text to string first so that I can use it again
+    let version_spec_json = version_spec_response.text().unwrap();
+    version_spec_file.write_all(version_spec_json.as_bytes()).unwrap();
+
+    // Deserialize version spec
+    let version_spec: VersionSpec = serde_json::from_str(&version_spec_json).unwrap();
+
+    // Download Minecraft jar
+    println!("Downloading Minecraft {0} jar", version.id);
+    let mut minecraft_jar_response = reqwest::get(&version_spec.downloads.client.url).unwrap();
+    let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
+    let mut minecraft_jar_file = fs::File::create(&minecraft_jar_path).unwrap();
+    io::copy(&mut minecraft_jar_response, &mut minecraft_jar_file).unwrap();
+
+    println!("Minecraft {0} downloaded", version.id);
+}
+
+fn launch_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) {
 }
 
 fn get_os() -> &'static str {
