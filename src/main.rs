@@ -13,7 +13,8 @@ use reqwest::header;
 use walkdir::WalkDir;
 use std::path::Path;
 use std::{fs, io};
-use std::io::Write;
+use std::io::{Read, Write};
+use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 // TODO: Move all these types to their own file where it won't clutter everything
@@ -65,6 +66,7 @@ struct VersionAssets {
 
 #[derive(Serialize, Deserialize)]
 struct Download {
+    path: Option<String>,
     sha1: String,
     size: u32,
     url: String,
@@ -78,7 +80,45 @@ struct VersionDownloads {
 }
 
 #[derive(Serialize, Deserialize)]
+struct LibraryDownloads {
+    // Apparently in older versions some libraries might not have an artifact
+    artifact: Option<Download>,
+    // This doesn't have a fully specified layout because a classifier can be called anything
+    classifiers: Option<BTreeMap<String, Download>>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LibraryNatives {
+    linux: Option<String>,
+    osx: Option<String>,
+    windows: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LibraryExtractOptions {
+    exclude: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuleOS {
+    name: Option<String>,
+    version: Option<String>,
+    arch: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Rule {
+    action: String,
+    os: Option<RuleOS>,
+}
+
+#[derive(Serialize, Deserialize)]
 struct Library {
+    downloads: LibraryDownloads,
+    name: String,
+    natives: Option<LibraryNatives>,
+    extract: Option<LibraryExtractOptions>,
+    rules: Option<Vec<Rule>>,
 }
 
 // TODO: Properly fill out the entire spec struct
@@ -131,14 +171,13 @@ fn main() {
         }
     }
 
-    // Check for whether selected version is installed
+    // Gets the spec for the selected version
+    // Downloads minecraft if that version doesn't exist
     let version = version_list[version_num - 1];
-    if !Path::new(&format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id)).exists() {
-        println!("Minecraft {0} not found", version.id);
-        download_minecraft_version(minecraft_path, version);
-    }
+    let version_spec = get_version_spec(minecraft_path, version);
 
     // Check for necessary libraries
+    check_minecraft_libraries(minecraft_path, &version_spec);
     // TODO later
 
     // Check for necessary assets
@@ -147,7 +186,7 @@ fn main() {
     // Launch Minecraft
     // TODO later
     println!("Launching Minecraft {0}", version.id);
-    launch_minecraft_version(minecraft_path, version);
+    launch_minecraft_version(minecraft_path, &version_spec);
 }
 
 fn download_java(save_path: &str) {
@@ -216,7 +255,22 @@ fn download_java(save_path: &str) {
     println!("Java extracted to runtime/{0}-{1}/", get_os(), get_arch());
 }
 
-fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) {
+fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
+    // Check if the minecraft version is actually downloaded
+    let spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
+    if !Path::new(&spec_path).exists() {
+        println!("Minecraft {0} not found", version.id);
+        return download_minecraft_version(minecraft_path, version);
+    }
+    else {
+        let mut spec_file = fs::File::open(spec_path).unwrap();
+        let mut spec_json = String::new();
+        spec_file.read_to_string(&mut spec_json).unwrap();
+        return serde_json::from_str(&spec_json).unwrap()
+    }
+}
+
+fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
     // Create version folder if it doesn't exist
     if !Path::new(&format!("{0}/versions/{1}/", minecraft_path, version.id)).exists() {
         fs::create_dir_all(&format!("{0}/versions/{1}", minecraft_path, version.id)).unwrap();
@@ -240,11 +294,45 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
     let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
     let mut minecraft_jar_file = fs::File::create(&minecraft_jar_path).unwrap();
     io::copy(&mut minecraft_jar_response, &mut minecraft_jar_file).unwrap();
-
     println!("Minecraft {0} downloaded", version.id);
+
+    // Pass on the version spec
+    return version_spec;
 }
 
-fn launch_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) {
+fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
+    for library in version.libraries.iter() {
+        // Check if the library has a general jar
+        if library.downloads.artifact.is_some() {
+            // Check if the library has been downloaded
+            // Uses successive shadowing to please the borrow checker, plus it shows the successive building of the path
+            // Need as_ref before unwrapping the option so as to not consume it
+            let jar_path = library.downloads.artifact.as_ref().unwrap().path.as_ref().unwrap();
+            let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
+            let jar_path = Path::new(&jar_path);
+            if !jar_path.exists() {
+                println!("Library {0} not found, downloading", library.name);
+
+                // Create folders just to make sure
+                fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+
+                // Download the jar
+                let mut library_response = reqwest::get(&library.downloads.artifact.as_ref().unwrap().url).unwrap();
+                let mut library_jar = fs::File::create(jar_path).unwrap();
+                io::copy(&mut library_response, &mut library_jar).unwrap();
+            }
+            else {
+                println!("Library {0} already exists", library.name);
+            }
+        }
+
+        // TODO: Download any required natives
+        // Check if natives for the platform exist
+    }
+    println!("All libraries checked and downloaded");
+}
+
+fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
 }
 
 fn get_os() -> &'static str {
@@ -287,5 +375,17 @@ fn get_arch_java() -> &'static str {
     }
     else {
         arch
+    }
+}
+
+// Special get_os and get_arch wrapper functions that fit the minecraft naming convention
+// I don't think get_arch needs a wrapper, but I haven't seen x64 specified anywhere in Minecraft
+fn get_os_minecraft() -> &'static str {
+    let os = get_os();
+    if os == "macos" {
+        "osx"
+    }
+    else {
+        os
     }
 }
