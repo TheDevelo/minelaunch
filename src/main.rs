@@ -12,8 +12,8 @@ use tempfile::tempdir;
 use reqwest::header;
 use walkdir::WalkDir;
 use std::path::Path;
-use std::{fs, io};
-use std::io::{Read, Write};
+use std::fs;
+use std::io::{self, Read, Write};
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
@@ -178,7 +178,6 @@ fn main() {
 
     // Check for necessary libraries
     check_minecraft_libraries(minecraft_path, &version_spec);
-    // TODO later
 
     // Check for necessary assets
     // TODO later
@@ -302,6 +301,11 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
 
 fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
     for library in version.libraries.iter() {
+        // Check if library rules are satisfied and skip if not
+        if library.rules.is_some() && !spec_rules_satisfied(library.rules.as_ref().unwrap()) {
+            continue;
+        }
+
         // Check if the library has a general jar
         if library.downloads.artifact.is_some() {
             // Check if the library has been downloaded
@@ -326,13 +330,77 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             }
         }
 
-        // TODO: Download any required natives
-        // Check if natives for the platform exist
+        // Get name of the native's classifier wrappen in an option, returns None if no native
+        let classifier_name = library.natives.as_ref().and_then(|n| {
+            match get_os() {
+                "windows" => n.windows.as_ref(),
+                "macos" => n.osx.as_ref(),
+                "linux" => n.linux.as_ref(),
+                _ => None,
+            }
+        });
+
+        if classifier_name.is_some() {
+            // Check if the native has been downloaded
+            // TODO: Classifier name could have variable substitution inside, ie "windows-${arch}", get that working
+            let native_classifier = library.downloads.classifiers.as_ref().unwrap().get(classifier_name.unwrap()).unwrap();
+            let jar_path = native_classifier.path.as_ref().unwrap();
+            let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
+            let jar_path = Path::new(&jar_path);
+            if !jar_path.exists() {
+                println!("Native for {0} not found, downloading", library.name);
+
+                // Create folders just to make sure
+                fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
+
+                // Download the jar
+                let mut native_response = reqwest::get(&native_classifier.url).unwrap();
+                let mut native_jar = fs::File::create(jar_path).unwrap();
+                io::copy(&mut native_response, &mut native_jar).unwrap();
+            }
+            else {
+                println!("Native for {0} already exists", library.name);
+            }
+        }
     }
     println!("All libraries checked and downloaded");
 }
 
 fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
+}
+
+fn spec_rules_satisfied(rules: &Vec<Rule>) -> bool {
+    for rule in rules {
+        // Define whether to return on a match or mismatch
+        let allow_match = match rule.action.as_str() {
+            "allow" => true,
+            "disallow" => false,
+            _ => panic!("Unknown rule action"),
+        };
+
+        // Check if os is matched
+        if rule.os.is_some() {
+            // TODO: support version matching, no clue how to get version currently
+            let os_ok = match rule.os.as_ref().unwrap().name.as_ref() {
+                Some(s) if s == get_os_minecraft() => true,
+                Some(_) => false,
+                _ => true,
+            };
+            let arch_ok = match rule.os.as_ref().unwrap().arch.as_ref() {
+                Some(s) if s == get_arch() => true,
+                Some(_) => false,
+                _ => true,
+            };
+
+            if os_ok && arch_ok && !allow_match {
+                return false;
+            }
+            if !(os_ok && arch_ok) && allow_match {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 fn get_os() -> &'static str {
