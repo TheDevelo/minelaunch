@@ -62,6 +62,12 @@ struct VersionArguments {
 
 #[derive(Serialize, Deserialize)]
 struct VersionAssets {
+    id: String,
+    sha1: String,
+    size: u32,
+    #[serde(rename="totalSize")]
+    total_size: u32,
+    url: String
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,6 +144,18 @@ struct VersionSpec {
     minimum_launcher_version: u8,
 }
 
+#[derive(Serialize, Deserialize)]
+struct AssetObject {
+    hash: String,
+    size: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+// TODO: Fill out with legacy and map_to_resources which I don't fully understand
+struct AssetIndex {
+    objects: BTreeMap<String, AssetObject>,
+}
+
 fn main() {
     let minecraft_path = ".";
 
@@ -180,7 +198,7 @@ fn main() {
     check_minecraft_libraries(minecraft_path, &version_spec);
 
     // Check for necessary assets
-    // TODO later
+    check_minecraft_assets(minecraft_path, &version_spec);
 
     // Launch Minecraft
     // TODO later
@@ -314,7 +332,10 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             let jar_path = library.downloads.artifact.as_ref().unwrap().path.as_ref().unwrap();
             let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
             let jar_path = Path::new(&jar_path);
-            if !jar_path.exists() {
+            if jar_path.exists() {
+                println!("Library {0} already exists", library.name);
+            }
+            else {
                 println!("Library {0} not found, downloading", library.name);
 
                 // Create folders just to make sure
@@ -324,9 +345,6 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
                 let mut library_response = reqwest::get(&library.downloads.artifact.as_ref().unwrap().url).unwrap();
                 let mut library_jar = fs::File::create(jar_path).unwrap();
                 io::copy(&mut library_response, &mut library_jar).unwrap();
-            }
-            else {
-                println!("Library {0} already exists", library.name);
             }
         }
 
@@ -347,7 +365,10 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             let jar_path = native_classifier.path.as_ref().unwrap();
             let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
             let jar_path = Path::new(&jar_path);
-            if !jar_path.exists() {
+            if jar_path.exists() {
+                println!("Native for {0} already exists", library.name);
+            }
+            else {
                 println!("Native for {0} not found, downloading", library.name);
 
                 // Create folders just to make sure
@@ -358,12 +379,59 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
                 let mut native_jar = fs::File::create(jar_path).unwrap();
                 io::copy(&mut native_response, &mut native_jar).unwrap();
             }
-            else {
-                println!("Native for {0} already exists", library.name);
-            }
         }
     }
     println!("All libraries checked and downloaded");
+}
+
+fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
+    let index_path = format!("{0}/assets/indexes/{1}.json", minecraft_path, version.assets);
+    let index_path = Path::new(&index_path);
+    let mut index_json = String::new();
+    // Check if the asset index is downloaded
+    if index_path.exists() {
+        // Open asset index if downloaded
+        let mut index_file = fs::File::open(index_path).unwrap();
+        index_file.read_to_string(&mut index_json).unwrap();
+    }
+    else {
+        println!("Asset Index {0} not found, downloading", version.assets);
+
+        // Create folders just to make sure
+        fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+
+        // Download the asset index
+        let mut index_response = reqwest::get(&version.asset_index.url).unwrap();
+        let mut index_file = fs::File::create(index_path).unwrap();
+        index_json = index_response.text().unwrap();
+        index_file.write_all(index_json.as_bytes()).unwrap();
+    }
+
+    // Deserialize asset index
+    let asset_index: AssetIndex = serde_json::from_str(&index_json).unwrap();
+
+    // Check and download all assets
+    for (asset_name, asset_object) in asset_index.objects {
+        let asset_path = format!("{0}/assets/objects/{1}/{2}", minecraft_path, &asset_object.hash[..2], asset_object.hash);
+        let asset_path = Path::new(&asset_path);
+
+        if asset_path.exists() {
+            println!("Asset {0} already exists", asset_name);
+        }
+        else {
+            println!("Asset {0} not found, downloading", asset_name);
+
+            // Create folders just to make sure
+            fs::create_dir_all(asset_path.parent().unwrap()).unwrap();
+
+            // Download the asset
+            let asset_url = format!("http://resources.download.minecraft.net/{0}/{1}", &asset_object.hash[..2], asset_object.hash);
+            let mut asset_response = reqwest::get(&asset_url).unwrap();
+            let mut asset_file = fs::File::create(asset_path).unwrap();
+            io::copy(&mut asset_response, &mut asset_file).unwrap();
+        }
+    }
+    println!("All assets checked and downloaded");
 }
 
 fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
