@@ -5,6 +5,7 @@ extern crate tar;
 extern crate walkdir;
 extern crate serde;
 extern crate serde_json;
+extern crate sha1;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -16,6 +17,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use sha1::Sha1;
 
 // TODO: Move all these types to their own file where it won't clutter everything
 // Types for version list JSON
@@ -64,9 +66,9 @@ struct VersionArguments {
 struct VersionAssets {
     id: String,
     sha1: String,
-    size: u32,
+    size: u64,
     #[serde(rename="totalSize")]
-    total_size: u32,
+    total_size: u64,
     url: String
 }
 
@@ -74,7 +76,7 @@ struct VersionAssets {
 struct Download {
     path: Option<String>,
     sha1: String,
-    size: u32,
+    size: u64,
     url: String,
 }
 
@@ -147,7 +149,7 @@ struct VersionSpec {
 #[derive(Serialize, Deserialize)]
 struct AssetObject {
     hash: String,
-    size: u32,
+    size: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -275,15 +277,26 @@ fn download_java(save_path: &str) {
 fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
     // Check if the minecraft version is actually downloaded
     let spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
-    if !Path::new(&spec_path).exists() {
-        println!("Minecraft {0} not found", version.id);
-        return download_minecraft_version(minecraft_path, version);
-    }
-    else {
+    if Path::new(&spec_path).exists() {
         let mut spec_file = fs::File::open(spec_path).unwrap();
         let mut spec_json = String::new();
         spec_file.read_to_string(&mut spec_json).unwrap();
-        return serde_json::from_str(&spec_json).unwrap()
+        let spec: VersionSpec = serde_json::from_str(&spec_json).unwrap();
+
+        // Check if the Minecraft jar is damaged
+        let jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
+        let jar_path = Path::new(&jar_path);
+        if !check_file(jar_path, &spec.downloads.client.sha1, spec.downloads.client.size) {
+            println!("Minecraft {0} jar damaged, downloading", version.id);
+            download_minecraft_jar(minecraft_path, &spec);
+            println!("Minecraft {0} jar downloaded", version.id);
+        }
+
+        return spec;
+    }
+    else {
+        println!("Minecraft {0} spec not found", version.id);
+        return download_minecraft_version(minecraft_path, version);
     }
 }
 
@@ -307,14 +320,18 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
 
     // Download Minecraft jar
     println!("Downloading Minecraft {0} jar", version.id);
-    let mut minecraft_jar_response = reqwest::get(&version_spec.downloads.client.url).unwrap();
-    let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
-    let mut minecraft_jar_file = fs::File::create(&minecraft_jar_path).unwrap();
-    io::copy(&mut minecraft_jar_response, &mut minecraft_jar_file).unwrap();
-    println!("Minecraft {0} downloaded", version.id);
+    download_minecraft_jar(minecraft_path, &version_spec);
+    println!("Minecraft {0} jar downloaded", version.id);
 
     // Pass on the version spec
     return version_spec;
+}
+
+fn download_minecraft_jar(minecraft_path: &str, version: &VersionSpec) {
+    let mut minecraft_jar_response = reqwest::get(&version.downloads.client.url).unwrap();
+    let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
+    let mut minecraft_jar_file = fs::File::create(&minecraft_jar_path).unwrap();
+    io::copy(&mut minecraft_jar_response, &mut minecraft_jar_file).unwrap();
 }
 
 fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
@@ -329,20 +346,21 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             // Check if the library has been downloaded
             // Uses successive shadowing to please the borrow checker, plus it shows the successive building of the path
             // Need as_ref before unwrapping the option so as to not consume it
-            let jar_path = library.downloads.artifact.as_ref().unwrap().path.as_ref().unwrap();
+            let download_artifact = library.downloads.artifact.as_ref().unwrap();
+            let jar_path = download_artifact.path.as_ref().unwrap();
             let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
             let jar_path = Path::new(&jar_path);
-            if jar_path.exists() {
+            if check_file(jar_path, &download_artifact.sha1, download_artifact.size) {
                 println!("Library {0} already exists", library.name);
             }
             else {
-                println!("Library {0} not found, downloading", library.name);
+                println!("Library {0} not found or damaged, downloading", library.name);
 
                 // Create folders just to make sure
                 fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
 
                 // Download the jar
-                let mut library_response = reqwest::get(&library.downloads.artifact.as_ref().unwrap().url).unwrap();
+                let mut library_response = reqwest::get(&download_artifact.url).unwrap();
                 let mut library_jar = fs::File::create(jar_path).unwrap();
                 io::copy(&mut library_response, &mut library_jar).unwrap();
             }
@@ -365,11 +383,11 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             let jar_path = native_classifier.path.as_ref().unwrap();
             let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
             let jar_path = Path::new(&jar_path);
-            if jar_path.exists() {
+            if check_file(jar_path, &native_classifier.sha1, native_classifier.size) {
                 println!("Native for {0} already exists", library.name);
             }
             else {
-                println!("Native for {0} not found, downloading", library.name);
+                println!("Native for {0} not found or damaged, downloading", library.name);
 
                 // Create folders just to make sure
                 fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
@@ -388,14 +406,15 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     let index_path = format!("{0}/assets/indexes/{1}.json", minecraft_path, version.assets);
     let index_path = Path::new(&index_path);
     let mut index_json = String::new();
+
     // Check if the asset index is downloaded
-    if index_path.exists() {
+    if check_file(index_path, &version.asset_index.sha1, version.asset_index.size) {
         // Open asset index if downloaded
         let mut index_file = fs::File::open(index_path).unwrap();
         index_file.read_to_string(&mut index_json).unwrap();
     }
     else {
-        println!("Asset Index {0} not found, downloading", version.assets);
+        println!("Asset Index {0} not found or damaged, downloading", version.assets);
 
         // Create folders just to make sure
         fs::create_dir_all(index_path.parent().unwrap()).unwrap();
@@ -415,11 +434,11 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
         let asset_path = format!("{0}/assets/objects/{1}/{2}", minecraft_path, &asset_object.hash[..2], asset_object.hash);
         let asset_path = Path::new(&asset_path);
 
-        if asset_path.exists() {
+        if check_file(asset_path, &asset_object.hash, asset_object.size) {
             println!("Asset {0} already exists", asset_name);
         }
         else {
-            println!("Asset {0} not found, downloading", asset_name);
+            println!("Asset {0} not found or damaged, downloading", asset_name);
 
             // Create folders just to make sure
             fs::create_dir_all(asset_path.parent().unwrap()).unwrap();
@@ -435,6 +454,28 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
 }
 
 fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
+}
+
+fn check_file(file_path: &Path, sha1: &str, size: u64) -> bool {
+    // Check if the file actually exists first
+    if !file_path.exists() {
+        return false;
+    }
+
+    // Check if the size matches
+    let mut file = fs::File::open(file_path).unwrap();
+    if file.metadata().unwrap().len() != size {
+        return false;
+    }
+
+    // Check if sha1 hash matches
+    let mut file_content = Vec::new();
+    file.read_to_end(&mut file_content).unwrap();
+    if Sha1::from(file_content).hexdigest() != sha1 {
+        return false;
+    }
+
+    return true;
 }
 
 fn spec_rules_satisfied(rules: &Vec<Rule>) -> bool {
