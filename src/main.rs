@@ -2,32 +2,37 @@ extern crate reqwest;
 extern crate tempfile;
 extern crate flate2;
 extern crate tar;
+extern crate zip;
 extern crate walkdir;
 extern crate serde;
 extern crate serde_json;
 extern crate sha1;
+extern crate regex;
 
 use flate2::read::GzDecoder;
-use flate2::read::ZlibDecoder;
 use tar::Archive;
-use tempfile::tempdir;
+use zip::read::ZipArchive;
+use tempfile::{tempfile, tempdir};
 use walkdir::WalkDir;
 use std::path::Path;
-use std::fs;
+use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
+use std::process::Command;
+use serde::Deserialize;
 use sha1::Sha1;
+use regex::Regex;
+use regex::Captures;
 
 // TODO: Move all these types to their own file where it won't clutter everything
 // Types for version list JSON
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct MinecraftLatestVersions {
     release: String,
     snapshot: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct MinecraftVersion {
     id: String,
     #[serde(rename="type")]
@@ -38,7 +43,7 @@ struct MinecraftVersion {
     release_time: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct MinecraftVersionList {
     latest: MinecraftLatestVersions,
     versions: Vec<MinecraftVersion>,
@@ -46,23 +51,33 @@ struct MinecraftVersionList {
 
 // Types for version spec JSON
 // Honestly these types are pretty complex and I don't need them right now so I'll leave them blank
-#[derive(Serialize, Deserialize)]
-struct DynamicArgument {
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SingleOrVec<T> {
+    Single(T),
+    Vector(Vec<T>),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
+struct DynamicArgument {
+    rules: Vec<Rule>,
+    value: SingleOrVec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
 enum Argument {
     Static(String),
     Dynamic(DynamicArgument),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct VersionArguments {
     game: Vec<Argument>,
     jvm: Vec<Argument>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct VersionAssets {
     id: String,
     sha1: String,
@@ -72,7 +87,7 @@ struct VersionAssets {
     url: String
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct Download {
     path: Option<String>,
     sha1: String,
@@ -80,14 +95,14 @@ struct Download {
     url: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct VersionDownloads {
     client: Download,
     // Server doesn't exist for versions before 1.2.5
     server: Option<Download>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct LibraryDownloads {
     // Apparently in older versions some libraries might not have an artifact
     artifact: Option<Download>,
@@ -95,32 +110,34 @@ struct LibraryDownloads {
     classifiers: Option<BTreeMap<String, Download>>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct LibraryNatives {
     linux: Option<String>,
     osx: Option<String>,
     windows: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct LibraryExtractOptions {
     exclude: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct RuleOS {
     name: Option<String>,
     version: Option<String>,
     arch: Option<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct Rule {
     action: String,
     os: Option<RuleOS>,
+    // Commented out because I need to figure out all features before implementing
+    // features: Option<Features>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct Library {
     downloads: LibraryDownloads,
     name: String,
@@ -130,10 +147,10 @@ struct Library {
 }
 
 // TODO: Properly fill out the entire spec struct
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct VersionSpec {
     // Commented out because I have no clue how to make this work right now and it's not necessary
-    // arguments: VersionArguments,
+    arguments: Option<VersionArguments>,
     #[serde(rename="assetIndex")]
     asset_index: VersionAssets,
     assets: String,
@@ -144,15 +161,17 @@ struct VersionSpec {
     main_class: String,
     #[serde(rename="minimumLauncherVersion")]
     minimum_launcher_version: u8,
+    #[serde(rename="type")]
+    version_type: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 struct AssetObject {
     hash: String,
     size: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 // TODO: Fill out with legacy and map_to_resources which I don't fully understand
 struct AssetIndex {
     objects: BTreeMap<String, AssetObject>,
@@ -212,14 +231,16 @@ fn download_java(save_path: &str) {
     // Download Java runtime
     println!("Downloading Java for {0}-{1}", get_os(), get_arch());
     let java_url = format!("https://api.adoptopenjdk.net/v3/binary/version/jdk8u282-b08/{0}/{1}/jre/hotspot/normal/adoptopenjdk", get_os_java(), get_arch_java());
-    let response = reqwest::get(&java_url).unwrap();
+    let mut response = reqwest::get(&java_url).unwrap();
 
     // Extract Java runtime to tempdir
     println!("Extracting Java");
     let extract_dir = tempdir().unwrap();
     if get_os() == "windows" {
-        let mut archive = Archive::new(ZlibDecoder::new(response));
-        archive.unpack(extract_dir.path()).unwrap();
+        let mut temp_file = tempfile().unwrap();
+        response.copy_to(&mut temp_file).unwrap();
+        let mut archive = ZipArchive::new(temp_file).unwrap();
+        archive.extract(extract_dir.path()).unwrap();
     }
     else {
         let mut archive = Archive::new(GzDecoder::new(response));
@@ -438,6 +459,135 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
 }
 
 fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
+    // Construct any configuration variables for string replacement
+    let mut config = BTreeMap::new();
+    config.insert("launcher_name", "Minelaunch");
+    config.insert("launcher_version", "0.2.0");
+    config.insert("auth_player_name", "TestUser");
+    config.insert("version_name", &version.id);
+    config.insert("game_directory", minecraft_path);
+    let assets_root = format!("{0}/assets/", minecraft_path);
+    config.insert("assets_root", &assets_root);
+    config.insert("assets_index_name", &version.assets);
+    config.insert("auth_uuid", "");
+    config.insert("auth_access_token", "");
+    config.insert("user_type", "offline"); // For later, I assume this variable is whether it is a Mojang or Microsoft account, since for my game it launches as mojang
+    config.insert("version_type", &version.version_type);
+
+    // Construct classpath and natives directory
+    let mut classpath = String::new();
+    let natives_dir = tempdir().unwrap();
+    for library in version.libraries.iter() {
+        // Check if library rules are satisfied and skip if not
+        if library.rules.is_some() && !spec_rules_satisfied(library.rules.as_ref().unwrap()) {
+            continue;
+        }
+
+        // Check if the library has a general jar
+        if library.downloads.artifact.is_some() {
+            // Uses successive shadowing to please the borrow checker, plus it shows the successive building of the path
+            // Need as_ref before unwrapping the option so as to not consume it
+            let download_artifact = library.downloads.artifact.as_ref().unwrap();
+            let jar_path = download_artifact.path.as_ref().unwrap();
+            let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
+
+            // Add to the classpath
+            classpath += &jar_path;
+            if get_os() == "windows" {
+                classpath += ";";
+            }
+            else {
+                classpath += ":";
+            }
+        }
+
+        // Get name of the native's classifier wrappen in an option, returns None if no native
+        let classifier_name = library.natives.as_ref().and_then(|n| {
+            match get_os() {
+                "windows" => n.windows.as_ref(),
+                "macos" => n.osx.as_ref(),
+                "linux" => n.linux.as_ref(),
+                _ => None,
+            }
+        });
+
+        if classifier_name.is_some() {
+            // Check if the native has been downloaded
+            // TODO: Classifier name could have variable substitution inside, ie "windows-${arch}", get that working
+            let native_classifier = library.downloads.classifiers.as_ref().unwrap().get(classifier_name.unwrap()).unwrap();
+            let jar_path = native_classifier.path.as_ref().unwrap();
+            let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
+            let jar_path = Path::new(&jar_path);
+
+            // Extract into the natives directory
+            let natives_jar = File::open(jar_path).unwrap();
+            let mut archive = ZipArchive::new(natives_jar).unwrap();
+            archive.extract(natives_dir.path()).unwrap();
+            println!("Extracted native for {0}", library.name);
+        }
+    }
+    classpath += &format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id); // Don't forget to add the Minecraft jar itself
+    config.insert("classpath", &classpath);
+    config.insert("natives_directory", natives_dir.path().to_str().unwrap());
+
+    // Construct the launch arguments
+    let mut launch_args = Vec::<String>::new();
+    for arg in version.arguments.as_ref().unwrap().jvm.iter() {
+        match arg {
+            Argument::Static(arg_str) => launch_args.push(arg_str.to_string()),
+            Argument::Dynamic(dynamic_arg) => {
+                if spec_rules_satisfied(&dynamic_arg.rules) {
+                    match &dynamic_arg.value {
+                        SingleOrVec::Single(dynamic_arg_value) => launch_args.push(dynamic_arg_value.to_string()),
+                        SingleOrVec::Vector(dynamic_arg_vec) => {
+                            for dynamic_arg_value in dynamic_arg_vec.iter() {
+                                launch_args.push(dynamic_arg_value.to_string());
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    }
+    launch_args.push(version.main_class.clone());
+    for arg in version.arguments.as_ref().unwrap().game.iter() {
+        match arg {
+            Argument::Static(arg_str) => launch_args.push(arg_str.to_string()),
+            Argument::Dynamic(dynamic_arg) => {
+                if spec_rules_satisfied(&dynamic_arg.rules) {
+                    match &dynamic_arg.value {
+                        SingleOrVec::Single(dynamic_arg_value) => launch_args.push(dynamic_arg_value.to_string()),
+                        SingleOrVec::Vector(dynamic_arg_vec) => {
+                            for dynamic_arg_value in dynamic_arg_vec.iter() {
+                                launch_args.push(dynamic_arg_value.to_string());
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    }
+
+    // Replace ${config} variables with the values
+    let regex = Regex::new(r"\$\{([^\}]*)\}").unwrap();
+    for arg in launch_args.iter_mut() {
+        let mut new_arg = regex.replace_all(arg, |captures: &Captures| {
+            match config.get(&captures[1]) {
+                Some(s) => s,
+                None => {
+                    println!("Need to define '{0}'", &captures[1]);
+                    ""
+                },
+            }
+        });
+        *arg = new_arg.to_mut().to_string();
+    }
+
+    // Run Minecraft
+    let mut java_process = Command::new(format!("{0}/runtime/{1}-{2}/bin/java", minecraft_path, get_os(), get_arch()));
+    java_process.args(launch_args);
+    let status = java_process.status().unwrap();
+    println!("Minecraft exited with status {0}", status);
 }
 
 fn check_file(file_path: &Path, sha1: &str, size: u64) -> bool {

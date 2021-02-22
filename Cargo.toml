@@ -1,6 +1,6 @@
 [package]
 name = "minelaunch"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Robert Fuchs <robertfuchsyoshi@gmail.com>"]
 edition = "2018"
 
@@ -13,3 +13,5 @@ tempfile = "3.0.7"
 tar = "0.4"
 walkdir = "2.2.7"
 sha1 = { version = "0.6", features = ["std"] }
+regex = "1.4"
+zip = "0.5"
