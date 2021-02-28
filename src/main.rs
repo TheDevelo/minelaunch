@@ -100,6 +100,9 @@ struct VersionDownloads {
     client: Download,
     // Server doesn't exist for versions before 1.2.5
     server: Option<Download>,
+    // Deobfuscation mappings don't exist for versions before 1.14.4
+    client_mappings: Option<Download>,
+    server_mappings: Option<Download>,
 }
 
 #[derive(Deserialize)]
@@ -134,7 +137,7 @@ struct Rule {
     action: String,
     os: Option<RuleOS>,
     // Commented out because I need to figure out all features before implementing
-    // features: Option<Features>,
+    features: Option<BTreeMap<String, bool>>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +162,8 @@ struct VersionSpec {
     libraries: Vec<Library>,
     #[serde(rename="mainClass")]
     main_class: String,
+    #[serde(rename="minecraftArguments")]
+    minecraft_arguments: Option<String>,
     #[serde(rename="minimumLauncherVersion")]
     minimum_launcher_version: u8,
     #[serde(rename="type")]
@@ -532,40 +537,63 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
 
     // Construct the launch arguments
     let mut launch_args = Vec::<String>::new();
-    for arg in version.arguments.as_ref().unwrap().jvm.iter() {
-        match arg {
-            Argument::Static(arg_str) => launch_args.push(arg_str.to_string()),
-            Argument::Dynamic(dynamic_arg) => {
-                if spec_rules_satisfied(&dynamic_arg.rules) {
-                    match &dynamic_arg.value {
-                        SingleOrVec::Single(dynamic_arg_value) => launch_args.push(dynamic_arg_value.to_string()),
-                        SingleOrVec::Vector(dynamic_arg_vec) => {
-                            for dynamic_arg_value in dynamic_arg_vec.iter() {
-                                launch_args.push(dynamic_arg_value.to_string());
-                            }
-                        },
+    if version.arguments.is_some() {
+        for arg in version.arguments.as_ref().unwrap().jvm.iter() {
+            match arg {
+                Argument::Static(arg_str) => launch_args.push(arg_str.to_string()),
+                Argument::Dynamic(dynamic_arg) => {
+                    if spec_rules_satisfied(&dynamic_arg.rules) {
+                        match &dynamic_arg.value {
+                            SingleOrVec::Single(dynamic_arg_value) => launch_args.push(dynamic_arg_value.to_string()),
+                            SingleOrVec::Vector(dynamic_arg_vec) => {
+                                for dynamic_arg_value in dynamic_arg_vec.iter() {
+                                    launch_args.push(dynamic_arg_value.to_string());
+                                }
+                            },
+                        }
                     }
-                }
-            },
+                },
+            }
+        }
+        launch_args.push(version.main_class.clone());
+        for arg in version.arguments.as_ref().unwrap().game.iter() {
+            match arg {
+                Argument::Static(arg_str) => launch_args.push(arg_str.to_string()),
+                Argument::Dynamic(dynamic_arg) => {
+                    if spec_rules_satisfied(&dynamic_arg.rules) {
+                        match &dynamic_arg.value {
+                            SingleOrVec::Single(dynamic_arg_value) => launch_args.push(dynamic_arg_value.to_string()),
+                            SingleOrVec::Vector(dynamic_arg_vec) => {
+                                for dynamic_arg_value in dynamic_arg_vec.iter() {
+                                    launch_args.push(dynamic_arg_value.to_string());
+                                }
+                            },
+                        }
+                    }
+                },
+            }
         }
     }
-    launch_args.push(version.main_class.clone());
-    for arg in version.arguments.as_ref().unwrap().game.iter() {
-        match arg {
-            Argument::Static(arg_str) => launch_args.push(arg_str.to_string()),
-            Argument::Dynamic(dynamic_arg) => {
-                if spec_rules_satisfied(&dynamic_arg.rules) {
-                    match &dynamic_arg.value {
-                        SingleOrVec::Single(dynamic_arg_value) => launch_args.push(dynamic_arg_value.to_string()),
-                        SingleOrVec::Vector(dynamic_arg_vec) => {
-                            for dynamic_arg_value in dynamic_arg_vec.iter() {
-                                launch_args.push(dynamic_arg_value.to_string());
-                            }
-                        },
-                    }
-                }
-            },
+    else {
+        // Hardcoded JVM arguments, since they're not specified in the version spec
+        if get_os() == "windows" {
+            launch_args.push("-XX:HeapDumpPath=MojangTricksIntelDriversForPerformance_javaw.exe_minecraft.exe.heapdump".to_string());
+            // TODO: Do -Dos.name=Windows 10 and -Dos.version=10.0 if Windows 10
         }
+        if get_os() == "macos" {
+            launch_args.push("-XstartOnFirstThread".to_string());
+        }
+        if get_arch() == "x86" {
+            launch_args.push("-Xss1M".to_string());
+        }
+        launch_args.push("-Djava.library.path=${natives_directory}".to_string());
+        launch_args.push("-Dminecraft.launcher.brand=${launcher_name}".to_string());
+        launch_args.push("-Dminecraft.launcher.version=${launcher_version}".to_string());
+        launch_args.push("-cp".to_string());
+        launch_args.push("${classpath}".to_string());
+        launch_args.push(version.main_class.clone());
+        let mut minecraft_args: Vec<String> = version.minecraft_arguments.as_ref().unwrap().split(" ").map(|s| s.to_string()).collect();
+        launch_args.append(&mut minecraft_args);
     }
 
     // Replace ${config} variables with the values
@@ -641,6 +669,13 @@ fn spec_rules_satisfied(rules: &Vec<Rule>) -> bool {
             if !(os_ok && arch_ok) && allow_match {
                 return false;
             }
+        }
+
+        if rule.features.is_some() {
+            // TODO: Implement real features checking
+            // For now, ignore since the only features are has_custom_resolution and is_demo_user,
+            // and we don't want either to trip.
+            return false;
         }
     }
     return true;
