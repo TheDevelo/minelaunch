@@ -177,9 +177,11 @@ struct AssetObject {
 }
 
 #[derive(Deserialize)]
-// TODO: Fill out with legacy and map_to_resources which I don't fully understand
 struct AssetIndex {
     objects: BTreeMap<String, AssetObject>,
+    #[serde(rename="virtual")]
+    virtual_assets: Option<bool>,
+    map_to_resources: Option<bool>,
 }
 
 fn main() {
@@ -192,7 +194,7 @@ fn main() {
     }
 
     // Get list of Minecraft versions
-    let mut minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest.json").unwrap();
+    let mut minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json").unwrap();
     let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_response.text().unwrap()).unwrap();
 
     // Display list of versions for user to pick
@@ -227,7 +229,6 @@ fn main() {
     check_minecraft_assets(minecraft_path, &version_spec);
 
     // Launch Minecraft
-    // TODO later
     println!("Launching Minecraft {0}", version.id);
     launch_minecraft_version(minecraft_path, &version_spec);
 }
@@ -459,6 +460,43 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
             let mut asset_file = fs::File::create(asset_path).unwrap();
             io::copy(&mut asset_response, &mut asset_file).unwrap();
         }
+
+        // Copy to either virtual or resources for older versions
+        if asset_index.virtual_assets == Some(true) {
+            let virtual_path = format!("{0}/assets/virtual/{1}/{2}", minecraft_path, version.assets, asset_name);
+            let virtual_path = Path::new(&virtual_path);
+
+            if check_file(virtual_path, &asset_object.hash, asset_object.size) {
+                println!("Virtual asset {0} already exists", asset_name);
+            }
+            else {
+                println!("Virtual asset {0} not found or damaged, copying", asset_name);
+
+                // Create folders just to make sure
+                fs::create_dir_all(virtual_path.parent().unwrap()).unwrap();
+
+                // Copy the asset
+                fs::copy(&asset_path, &virtual_path).unwrap();
+            }
+        }
+
+        if asset_index.map_to_resources == Some(true) {
+            let resource_path = format!("{0}/resources/{1}", minecraft_path, asset_name);
+            let resource_path = Path::new(&resource_path);
+
+            if check_file(resource_path, &asset_object.hash, asset_object.size) {
+                println!("Resource asset {0} already exists", asset_name);
+            }
+            else {
+                println!("Resource asset {0} not found or damaged, copying", asset_name);
+
+                // Create folders just to make sure
+                fs::create_dir_all(resource_path.parent().unwrap()).unwrap();
+
+                // Copy the asset
+                fs::copy(&asset_path, &resource_path).unwrap();
+            }
+        }
     }
     println!("All assets checked and downloaded");
 }
@@ -478,6 +516,8 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
     config.insert("auth_access_token", "");
     config.insert("user_type", "offline"); // For later, I assume this variable is whether it is a Mojang or Microsoft account, since for my game it launches as mojang
     config.insert("version_type", &version.version_type);
+    let game_assets = format!("{0}/assets/virtual/{1}/", minecraft_path, &version.assets);
+    config.insert("game_assets", &game_assets);
 
     // Construct classpath and natives directory
     let mut classpath = String::new();
@@ -531,7 +571,8 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
             println!("Extracted native for {0}", library.name);
         }
     }
-    classpath += &format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id); // Don't forget to add the Minecraft jar itself
+    let jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
+    classpath += &jar_path; // Don't forget to add the Minecraft jar itself
     config.insert("classpath", &classpath);
     config.insert("natives_directory", natives_dir.path().to_str().unwrap());
 
@@ -589,6 +630,7 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
         launch_args.push("-Djava.library.path=${natives_directory}".to_string());
         launch_args.push("-Dminecraft.launcher.brand=${launcher_name}".to_string());
         launch_args.push("-Dminecraft.launcher.version=${launcher_version}".to_string());
+        launch_args.push(format!("-Dminecraft.client.jar={0}", jar_path).to_string());
         launch_args.push("-cp".to_string());
         launch_args.push("${classpath}".to_string());
         launch_args.push(version.main_class.clone());
