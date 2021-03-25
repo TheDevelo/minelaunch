@@ -1,13 +1,6 @@
-extern crate reqwest;
-extern crate tempfile;
-extern crate flate2;
-extern crate tar;
-extern crate zip;
-extern crate walkdir;
-extern crate serde;
-extern crate serde_json;
-extern crate sha1;
-extern crate regex;
+mod env;
+mod util;
+mod gui;
 
 use flate2::read::GzDecoder;
 use tar::Archive;
@@ -18,11 +11,14 @@ use std::path::Path;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::collections::BTreeMap;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
+use std::sync::{Arc, Mutex};
 use serde::Deserialize;
-use sha1::Sha1;
-use regex::Regex;
-use regex::Captures;
+use iced::Application;
+
+use env::Environment;
+use util::*;
+use gui::GUI;
 
 // TODO: Move all these types to their own file where it won't clutter everything
 // Types for version list JSON
@@ -32,8 +28,8 @@ struct MinecraftLatestVersions {
     snapshot: String,
 }
 
-#[derive(Deserialize)]
-struct MinecraftVersion {
+#[derive(Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct MinecraftVersion {
     id: String,
     #[serde(rename="type")]
     version_type: String,
@@ -44,13 +40,12 @@ struct MinecraftVersion {
 }
 
 #[derive(Deserialize)]
-struct MinecraftVersionList {
+pub struct MinecraftVersionList {
     latest: MinecraftLatestVersions,
     versions: Vec<MinecraftVersion>,
 }
 
 // Types for version spec JSON
-// Honestly these types are pretty complex and I don't need them right now so I'll leave them blank
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum SingleOrVec<T> {
@@ -136,7 +131,6 @@ struct RuleOS {
 struct Rule {
     action: String,
     os: Option<RuleOS>,
-    // Commented out because I need to figure out all features before implementing
     features: Option<BTreeMap<String, bool>>,
 }
 
@@ -152,7 +146,6 @@ struct Library {
 // TODO: Properly fill out the entire spec struct
 #[derive(Deserialize)]
 struct VersionSpec {
-    // Commented out because I have no clue how to make this work right now and it's not necessary
     arguments: Option<VersionArguments>,
     #[serde(rename="assetIndex")]
     asset_index: VersionAssets,
@@ -184,8 +177,16 @@ struct AssetIndex {
     map_to_resources: Option<bool>,
 }
 
-fn main() {
+fn main() -> iced::Result {
     let minecraft_path = ".";
+    let mut env = Environment::new();
+    env.set("game_directory", minecraft_path);
+    env.set("launcher_name", "Minelaunch");
+    env.set("launcher_version", env!("CARGO_PKG_VERSION"));
+    env.set("auth_player_name", "TestUser"); // TODO: Allow changing username
+    env.set("auth_uuid", ""); // TODO: Allow logging in
+    env.set("auth_access_token", "");
+    env.set("user_type", "offline"); // For later, I assume this variable is whether it is a Mojang or Microsoft account, since for my game it launches as mojang
 
     // Check for java installation for the current platform
     if !Path::new(&format!("{0}/runtime/{1}-{2}/", minecraft_path, get_os(), get_arch())).exists() {
@@ -197,40 +198,12 @@ fn main() {
     let mut minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json").unwrap();
     let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_response.text().unwrap()).unwrap();
 
-    // Display list of versions for user to pick
-    println!("Available versions:");
-    let version_list = minecraft_versions.versions.iter().filter(|v| v.version_type == "release").collect::<Vec<&MinecraftVersion>>();
-    for (n, version) in version_list.iter().enumerate() {
-        println!("{0}. {1}", n+1, version.id);
-    }
-    print!("Which version would you like to play (use the number in front): ");
-    let mut version_select_str = String::new();
-    let mut version_num = 0;
-    while version_num == 0 {
-        io::stdout().flush().unwrap();
-        version_select_str.clear();
-        io::stdin().read_line(&mut version_select_str).unwrap();
-        match version_select_str.trim().parse::<usize>() {
-            Ok(n) if n > 0 && n <= version_list.len() => version_num = n,
-            Ok(_) => print!("That's not a listed version. Try again: "),
-            Err(_) => print!("That's not a number. Try again: "),
-        }
-    }
-
-    // Gets the spec for the selected version
-    // Downloads minecraft if that version doesn't exist
-    let version = version_list[version_num - 1];
-    let version_spec = get_version_spec(minecraft_path, version);
-
-    // Check for necessary libraries
-    check_minecraft_libraries(minecraft_path, &version_spec);
-
-    // Check for necessary assets
-    check_minecraft_assets(minecraft_path, &version_spec);
-
-    // Launch Minecraft
-    println!("Launching Minecraft {0}", version.id);
-    launch_minecraft_version(minecraft_path, &version_spec);
+    // Launch the GUI
+    // TODO: Move the previous steps into the GUI
+    let mut settings = iced::Settings::with_flags((String::from(minecraft_path), minecraft_versions, env));
+    settings.window.size = (320,440);
+    settings.window.min_size = Some((320, 140));
+    GUI::run(settings)
 }
 
 fn download_java(save_path: &str) {
@@ -285,11 +258,38 @@ fn download_java(save_path: &str) {
     println!("Java extracted to runtime/{0}-{1}/", get_os(), get_arch());
 }
 
+async fn launch_sequence(minecraft_path: String, version: MinecraftVersion, env: Arc<Mutex<Environment>>) -> ExitStatus {
+    let mut env = env.lock().unwrap();
+
+    // Get the version spec for the specified version
+    // Downloads minecraft if that version doesn't exist
+    let version_spec = get_version_spec(&minecraft_path, &version);
+
+    env.set("version_name", &version_spec.id);
+    env.set("version_type", &version_spec.version_type);
+    let assets_root = format!("{0}/assets/", minecraft_path);
+    env.set("assets_root", &assets_root);
+    env.set("assets_index_name", &version_spec.assets);
+    let game_assets = format!("{0}/assets/virtual/{1}/", minecraft_path, &version_spec.assets);
+    env.set("game_assets", &game_assets);
+
+    // Check for necessary libraries
+    check_minecraft_libraries(&minecraft_path, &version_spec);
+
+    // Check for necessary assets
+    check_minecraft_assets(&minecraft_path, &version_spec);
+
+    // Launch Minecraft
+    println!("Launching Minecraft {0}", version.id);
+    return launch_minecraft_version(&minecraft_path, &version_spec, &mut env);
+}
+
 fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
     // Check if the minecraft version is actually downloaded
     let spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
     if Path::new(&spec_path).exists() {
-        let mut spec_file = fs::File::open(spec_path).unwrap();
+        // TODO: Check sha1 of the spec file
+        let mut spec_file = File::open(spec_path).unwrap();
         let mut spec_json = String::new();
         spec_file.read_to_string(&mut spec_json).unwrap();
         let spec: VersionSpec = serde_json::from_str(&spec_json).unwrap();
@@ -321,7 +321,7 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
     println!("Downloading Minecraft version spec");
     let mut version_spec_response = reqwest::get(&version.url).unwrap();
     let version_spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
-    let mut version_spec_file = fs::File::create(&version_spec_path).unwrap();
+    let mut version_spec_file = File::create(&version_spec_path).unwrap();
     // Copy text to string first so that I can use it again
     let version_spec_json = version_spec_response.text().unwrap();
     version_spec_file.write_all(version_spec_json.as_bytes()).unwrap();
@@ -341,7 +341,7 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
 fn download_minecraft_jar(minecraft_path: &str, version: &VersionSpec) {
     let mut minecraft_jar_response = reqwest::get(&version.downloads.client.url).unwrap();
     let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
-    let mut minecraft_jar_file = fs::File::create(&minecraft_jar_path).unwrap();
+    let mut minecraft_jar_file = File::create(&minecraft_jar_path).unwrap();
     io::copy(&mut minecraft_jar_response, &mut minecraft_jar_file).unwrap();
 }
 
@@ -372,7 +372,7 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
 
                 // Download the jar
                 let mut library_response = reqwest::get(&download_artifact.url).unwrap();
-                let mut library_jar = fs::File::create(jar_path).unwrap();
+                let mut library_jar = File::create(jar_path).unwrap();
                 io::copy(&mut library_response, &mut library_jar).unwrap();
             }
         }
@@ -405,7 +405,7 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
 
                 // Download the jar
                 let mut native_response = reqwest::get(&native_classifier.url).unwrap();
-                let mut native_jar = fs::File::create(jar_path).unwrap();
+                let mut native_jar = File::create(jar_path).unwrap();
                 io::copy(&mut native_response, &mut native_jar).unwrap();
             }
         }
@@ -421,7 +421,7 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     // Check if the asset index is downloaded
     if check_file(index_path, &version.asset_index.sha1, version.asset_index.size) {
         // Open asset index if downloaded
-        let mut index_file = fs::File::open(index_path).unwrap();
+        let mut index_file = File::open(index_path).unwrap();
         index_file.read_to_string(&mut index_json).unwrap();
     }
     else {
@@ -432,7 +432,7 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
 
         // Download the asset index
         let mut index_response = reqwest::get(&version.asset_index.url).unwrap();
-        let mut index_file = fs::File::create(index_path).unwrap();
+        let mut index_file = File::create(index_path).unwrap();
         index_json = index_response.text().unwrap();
         index_file.write_all(index_json.as_bytes()).unwrap();
     }
@@ -457,7 +457,7 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
             // Download the asset
             let asset_url = format!("http://resources.download.minecraft.net/{0}/{1}", &asset_object.hash[..2], asset_object.hash);
             let mut asset_response = reqwest::get(&asset_url).unwrap();
-            let mut asset_file = fs::File::create(asset_path).unwrap();
+            let mut asset_file = File::create(asset_path).unwrap();
             io::copy(&mut asset_response, &mut asset_file).unwrap();
         }
 
@@ -501,25 +501,9 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     println!("All assets checked and downloaded");
 }
 
-fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
-    // Construct any configuration variables for string replacement
-    let mut config = BTreeMap::new();
-    config.insert("launcher_name", "Minelaunch");
-    config.insert("launcher_version", "0.2.0");
-    config.insert("auth_player_name", "TestUser");
-    config.insert("version_name", &version.id);
-    config.insert("game_directory", minecraft_path);
-    let assets_root = format!("{0}/assets/", minecraft_path);
-    config.insert("assets_root", &assets_root);
-    config.insert("assets_index_name", &version.assets);
-    config.insert("auth_uuid", "");
-    config.insert("auth_access_token", "");
-    config.insert("user_type", "offline"); // For later, I assume this variable is whether it is a Mojang or Microsoft account, since for my game it launches as mojang
-    config.insert("version_type", &version.version_type);
-    let game_assets = format!("{0}/assets/virtual/{1}/", minecraft_path, &version.assets);
-    config.insert("game_assets", &game_assets);
-
+fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec, env: &mut Environment) -> ExitStatus {
     // Construct classpath and natives directory
+    // TODO: Move classpath construction to library
     let mut classpath = String::new();
     let natives_dir = tempdir().unwrap();
     for library in version.libraries.iter() {
@@ -573,8 +557,8 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
     }
     let jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
     classpath += &jar_path; // Don't forget to add the Minecraft jar itself
-    config.insert("classpath", &classpath);
-    config.insert("natives_directory", natives_dir.path().to_str().unwrap());
+    env.set("classpath", &classpath);
+    env.set("natives_directory", natives_dir.path().to_str().unwrap());
 
     // Construct the launch arguments
     let mut launch_args = Vec::<String>::new();
@@ -639,47 +623,16 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec) {
     }
 
     // Replace ${config} variables with the values
-    let regex = Regex::new(r"\$\{([^\}]*)\}").unwrap();
     for arg in launch_args.iter_mut() {
-        let mut new_arg = regex.replace_all(arg, |captures: &Captures| {
-            match config.get(&captures[1]) {
-                Some(s) => s,
-                None => {
-                    println!("Need to define '{0}'", &captures[1]);
-                    ""
-                },
-            }
-        });
-        *arg = new_arg.to_mut().to_string();
+        *arg = env.resolve(arg);
     }
 
     // Run Minecraft
     let mut java_process = Command::new(format!("{0}/runtime/{1}-{2}/bin/java", minecraft_path, get_os(), get_arch()));
     java_process.args(launch_args);
     let status = java_process.status().unwrap();
-    println!("Minecraft exited with status {0}", status);
-}
-
-fn check_file(file_path: &Path, sha1: &str, size: u64) -> bool {
-    // Check if the file actually exists first
-    if !file_path.exists() {
-        return false;
-    }
-
-    // Check if the size matches
-    let mut file = fs::File::open(file_path).unwrap();
-    if file.metadata().unwrap().len() != size {
-        return false;
-    }
-
-    // Check if sha1 hash matches
-    let mut file_content = Vec::new();
-    file.read_to_end(&mut file_content).unwrap();
-    if Sha1::from(file_content).hexdigest() != sha1 {
-        return false;
-    }
-
-    return true;
+    println!("Minecraft exited with {0}", status);
+    return status;
 }
 
 fn spec_rules_satisfied(rules: &Vec<Rule>) -> bool {
@@ -721,59 +674,4 @@ fn spec_rules_satisfied(rules: &Vec<Rule>) -> bool {
         }
     }
     return true;
-}
-
-fn get_os() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "windows"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else {
-        panic!("unsupported operating system!");
-    }
-}
-
-fn get_arch() -> &'static str {
-    if cfg!(target_arch = "x86") {
-        "x86"
-    } else if cfg!(target_arch = "x86_64") {
-        "x64"
-    } else {
-        panic!("unsupported architecture!");
-    }
-}
-
-// Special get_os and get_arch wrapper functions that fit the java naming convention
-fn get_os_java() -> &'static str {
-    let os = get_os();
-    if os == "macos" {
-        "mac"
-    }
-    else {
-        os
-    }
-}
-
-fn get_arch_java() -> &'static str {
-    let arch = get_arch();
-    if arch == "x86" {
-        "x32"
-    }
-    else {
-        arch
-    }
-}
-
-// Special get_os and get_arch wrapper functions that fit the minecraft naming convention
-// I don't think get_arch needs a wrapper, but I haven't seen x64 specified anywhere in Minecraft
-fn get_os_minecraft() -> &'static str {
-    let os = get_os();
-    if os == "macos" {
-        "osx"
-    }
-    else {
-        os
-    }
 }
