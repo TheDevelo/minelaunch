@@ -183,7 +183,7 @@ fn main() -> iced::Result {
     env.set("game_directory", minecraft_path);
     env.set("launcher_name", "Minelaunch");
     env.set("launcher_version", env!("CARGO_PKG_VERSION"));
-    env.set("auth_player_name", "TestUser"); // TODO: Allow changing username
+    env.set("auth_player_name", "");
     env.set("auth_uuid", ""); // TODO: Allow logging in
     env.set("auth_access_token", "");
     env.set("user_type", "offline"); // For later, I assume this variable is whether it is a Mojang or Microsoft account, since for my game it launches as mojang
@@ -202,7 +202,7 @@ fn main() -> iced::Result {
     // TODO: Move the previous steps into the GUI
     let mut settings = iced::Settings::with_flags((String::from(minecraft_path), minecraft_versions, env));
     settings.window.size = (320,440);
-    settings.window.min_size = Some((320, 140));
+    settings.window.min_size = Some((320, 170));
     GUI::run(settings)
 }
 
@@ -630,7 +630,7 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec, env: &m
     // Run Minecraft
     let mut java_process = Command::new(format!("{0}/runtime/{1}-{2}/bin/java", minecraft_path, get_os(), get_arch()));
     java_process.args(launch_args);
-    let status = java_process.status().unwrap();
+    let status = java_process.status().unwrap(); // TODO: Make this a non-blocking spawn, figure out exit status elsewhere
     println!("Minecraft exited with {0}", status);
     return status;
 }
