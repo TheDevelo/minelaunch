@@ -1,8 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::process::ExitStatus;
 use std::time::Duration;
 use iced::{Align, Application, Button, Column, Command, Container, Element, Length, PickList, Space, Subscription, Text, TextInput};
 use iced::{button, executor, pick_list, text_input, time};
+use async_std::sync::Mutex;
 
 use super::{MinecraftVersionList, MinecraftVersion};
 use super::env::Environment;
@@ -148,7 +149,7 @@ impl Application for GUI {
                     VersionSelection::Version(v) => { version = &v; },
                 };
 
-                return Command::perform(super::launch_sequence(self.launcher_path.clone(), version.clone(), self.env.clone()),
+                return Command::perform(super::launch_minecraft_version(self.launcher_path.clone(), version.clone(), self.env.clone()),
                                         move |s| { Message::MinecraftExited(s) });
             },
             Message::VersionSelected(version) => {
@@ -160,7 +161,7 @@ impl Application for GUI {
             }
             Message::CheckEnv => {
                 let env = self.env.try_lock();
-                if env.is_ok() {
+                if env.is_some() {
                     let mut env = env.unwrap();
                     env.set("auth_player_name", &self.username);
                     self.check_env = false;

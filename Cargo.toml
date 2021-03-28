@@ -1,6 +1,6 @@
 [package]
 name = "minelaunch"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["Robert Fuchs <robertfuchsyoshi@gmail.com>"]
 edition = "2018"
 
@@ -17,3 +17,4 @@ regex = "1.4"
 zip = "0.5"
 lazy_static  = "1.4.0"
 iced = { version = "0.2", features = ["async-std"] }
+async-std = { version = "1.9", features = ["unstable"] }

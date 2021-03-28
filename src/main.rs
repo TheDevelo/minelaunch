@@ -5,16 +5,18 @@ mod gui;
 use flate2::read::GzDecoder;
 use tar::Archive;
 use zip::read::ZipArchive;
-use tempfile::{tempfile, tempdir};
+use tempfile::{tempfile, tempdir, TempDir};
 use walkdir::WalkDir;
 use std::path::Path;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::collections::BTreeMap;
-use std::process::{Command, ExitStatus};
-use std::sync::{Arc, Mutex};
+use std::process::ExitStatus;
+use std::sync::Arc;
 use serde::Deserialize;
 use iced::Application;
+use async_std::process::Command;
+use async_std::sync::Mutex;
 
 use env::Environment;
 use util::*;
@@ -202,7 +204,7 @@ fn main() -> iced::Result {
     // TODO: Move the previous steps into the GUI
     let mut settings = iced::Settings::with_flags((String::from(minecraft_path), minecraft_versions, env));
     settings.window.size = (320,440);
-    settings.window.min_size = Some((320, 170));
+    settings.window.min_size = Some((320, 230));
     GUI::run(settings)
 }
 
@@ -258,8 +260,8 @@ fn download_java(save_path: &str) {
     println!("Java extracted to runtime/{0}-{1}/", get_os(), get_arch());
 }
 
-async fn launch_sequence(minecraft_path: String, version: MinecraftVersion, env: Arc<Mutex<Environment>>) -> ExitStatus {
-    let mut env = env.lock().unwrap();
+async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVersion, env: Arc<Mutex<Environment>>) -> ExitStatus {
+    let mut env = env.lock().await;
 
     // Get the version spec for the specified version
     // Downloads minecraft if that version doesn't exist
@@ -279,9 +281,20 @@ async fn launch_sequence(minecraft_path: String, version: MinecraftVersion, env:
     // Check for necessary assets
     check_minecraft_assets(&minecraft_path, &version_spec);
 
-    // Launch Minecraft
+    // Construct Launch Arguments
+    let natives_dir = tempdir().unwrap();
+    let launch_args = construct_launch_args(&minecraft_path, &version_spec, &mut env, &natives_dir);
+
+    // Drop mutex since we no longer need it
+    drop(env);
+
+    // Run Minecraft
     println!("Launching Minecraft {0}", version.id);
-    return launch_minecraft_version(&minecraft_path, &version_spec, &mut env);
+    let mut java_process = Command::new(format!("{0}/runtime/{1}-{2}/bin/java", minecraft_path, get_os(), get_arch()));
+    java_process.args(launch_args);
+    let status = java_process.status().await.unwrap();
+    println!("Minecraft exited with {0}", status);
+    return status;
 }
 
 fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
@@ -501,11 +514,10 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     println!("All assets checked and downloaded");
 }
 
-fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec, env: &mut Environment) -> ExitStatus {
+fn construct_launch_args(minecraft_path: &str, version: &VersionSpec, env: &mut Environment, natives_dir: &TempDir) -> Vec<String> {
     // Construct classpath and natives directory
     // TODO: Move classpath construction to library
     let mut classpath = String::new();
-    let natives_dir = tempdir().unwrap();
     for library in version.libraries.iter() {
         // Check if library rules are satisfied and skip if not
         if library.rules.is_some() && !spec_rules_satisfied(library.rules.as_ref().unwrap()) {
@@ -627,12 +639,7 @@ fn launch_minecraft_version(minecraft_path: &str, version: &VersionSpec, env: &m
         *arg = env.resolve(arg);
     }
 
-    // Run Minecraft
-    let mut java_process = Command::new(format!("{0}/runtime/{1}-{2}/bin/java", minecraft_path, get_os(), get_arch()));
-    java_process.args(launch_args);
-    let status = java_process.status().unwrap(); // TODO: Make this a non-blocking spawn, figure out exit status elsewhere
-    println!("Minecraft exited with {0}", status);
-    return status;
+    return launch_args;
 }
 
 fn spec_rules_satisfied(rules: &Vec<Rule>) -> bool {
