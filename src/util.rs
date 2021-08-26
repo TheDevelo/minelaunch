@@ -1,7 +1,7 @@
 use std::path::Path;
 use sha1::Sha1;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 
 pub fn check_file(file_path: &Path, sha1: &str, size: u64) -> bool {
     // Check if the file actually exists first
@@ -23,6 +23,14 @@ pub fn check_file(file_path: &Path, sha1: &str, size: u64) -> bool {
     }
 
     return true;
+}
+
+pub async fn download_to_file(file_path: String, url: String, id: String) -> String {
+    let file_path = Path::new(&file_path);
+    let response = reqwest::get(url).await.unwrap();
+    let mut file = File::create(file_path).unwrap();
+    file.write_all(&response.bytes().await.unwrap()).unwrap();
+    id
 }
 
 pub fn get_os() -> &'static str {

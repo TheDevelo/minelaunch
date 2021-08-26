@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::process::ExitStatus;
 use std::time::Duration;
-use iced::{Align, Application, Button, Column, Command, Container, Element, Length, PickList, Space, Subscription, Text, TextInput};
+use iced::{Align, Application, Button, Clipboard, Column, Command, Container, Element, Length, PickList, Space, Subscription, Text, TextInput};
 use iced::{button, executor, pick_list, text_input, time};
 use async_std::sync::Mutex;
 
@@ -123,7 +123,7 @@ impl Application for GUI {
             .into();
     }
 
-    fn update(&mut self, message: Message) -> Command<Message> {
+    fn update(&mut self, message: Message, _clipboard: &mut Clipboard) -> Command<Message> {
         match message {
             Message::LaunchPressed => {
                 self.last_exit_status = None;

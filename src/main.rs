@@ -9,7 +9,7 @@ use tempfile::{tempfile, tempdir, TempDir};
 use walkdir::WalkDir;
 use std::path::Path;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::collections::BTreeMap;
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -17,6 +17,8 @@ use serde::Deserialize;
 use iced::Application;
 use async_std::process::Command;
 use async_std::sync::Mutex;
+use bytes::Buf;
+use futures::stream::{self, StreamExt};
 
 use env::Environment;
 use util::*;
@@ -179,7 +181,8 @@ struct AssetIndex {
     map_to_resources: Option<bool>,
 }
 
-fn main() -> iced::Result {
+#[async_std::main]
+async fn main() -> iced::Result {
     let minecraft_path = ".";
     let mut env = Environment::new();
     env.set("game_directory", minecraft_path);
@@ -193,12 +196,12 @@ fn main() -> iced::Result {
     // Check for java installation for the current platform
     if !Path::new(&format!("{0}/runtime/{1}-{2}/", minecraft_path, get_os(), get_arch())).exists() {
         println!("Java installation not found");
-        download_java(minecraft_path);
+        download_java(minecraft_path).await;
     }
 
     // Get list of Minecraft versions
-    let mut minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json").unwrap();
-    let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_response.text().unwrap()).unwrap();
+    let minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json").await.unwrap();
+    let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_response.text().await.unwrap()).unwrap();
 
     // Launch the GUI
     // TODO: Move the previous steps into the GUI
@@ -208,23 +211,24 @@ fn main() -> iced::Result {
     GUI::run(settings)
 }
 
-fn download_java(save_path: &str) {
+async fn download_java(save_path: &str) {
     // Download Java runtime
     println!("Downloading Java for {0}-{1}", get_os(), get_arch());
+    // TODO: Java version depending on minecraft version
     let java_url = format!("https://api.adoptopenjdk.net/v3/binary/version/jdk8u282-b08/{0}/{1}/jre/hotspot/normal/adoptopenjdk", get_os_java(), get_arch_java());
-    let mut response = reqwest::get(&java_url).unwrap();
+    let response = reqwest::get(&java_url).await.unwrap();
 
     // Extract Java runtime to tempdir
     println!("Extracting Java");
     let extract_dir = tempdir().unwrap();
     if get_os() == "windows" {
         let mut temp_file = tempfile().unwrap();
-        response.copy_to(&mut temp_file).unwrap();
+        temp_file.write_all(&response.bytes().await.unwrap()).unwrap();
         let mut archive = ZipArchive::new(temp_file).unwrap();
         archive.extract(extract_dir.path()).unwrap();
     }
     else {
-        let mut archive = Archive::new(GzDecoder::new(response));
+        let mut archive = Archive::new(GzDecoder::new(response.bytes().await.unwrap().reader()));
         archive.unpack(extract_dir.path()).unwrap();
     }
 
@@ -265,7 +269,7 @@ async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVers
 
     // Get the version spec for the specified version
     // Downloads minecraft if that version doesn't exist
-    let version_spec = get_version_spec(&minecraft_path, &version);
+    let version_spec = get_version_spec(&minecraft_path, &version).await;
 
     env.set("version_name", &version_spec.id);
     env.set("version_type", &version_spec.version_type);
@@ -276,10 +280,10 @@ async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVers
     env.set("game_assets", &game_assets);
 
     // Check for necessary libraries
-    check_minecraft_libraries(&minecraft_path, &version_spec);
+    check_minecraft_libraries(&minecraft_path, &version_spec).await;
 
     // Check for necessary assets
-    check_minecraft_assets(&minecraft_path, &version_spec);
+    check_minecraft_assets(&minecraft_path, &version_spec).await;
 
     // Construct Launch Arguments
     let natives_dir = tempdir().unwrap();
@@ -297,7 +301,7 @@ async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVers
     return status;
 }
 
-fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
+async fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
     // Check if the minecraft version is actually downloaded
     let spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
     if Path::new(&spec_path).exists() {
@@ -312,7 +316,7 @@ fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> Version
         let jar_path = Path::new(&jar_path);
         if !check_file(jar_path, &spec.downloads.client.sha1, spec.downloads.client.size) {
             println!("Minecraft {0} jar damaged, downloading", version.id);
-            download_minecraft_jar(minecraft_path, &spec);
+            download_minecraft_jar(minecraft_path, &spec).await;
             println!("Minecraft {0} jar downloaded", version.id);
         }
 
@@ -320,11 +324,11 @@ fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> Version
     }
     else {
         println!("Minecraft {0} spec not found", version.id);
-        return download_minecraft_version(minecraft_path, version);
+        return download_minecraft_version(minecraft_path, version).await;
     }
 }
 
-fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
+async fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
     // Create version folder if it doesn't exist
     if !Path::new(&format!("{0}/versions/{1}/", minecraft_path, version.id)).exists() {
         fs::create_dir_all(&format!("{0}/versions/{1}", minecraft_path, version.id)).unwrap();
@@ -332,11 +336,11 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
 
     // Download Minecraft version spec
     println!("Downloading Minecraft version spec");
-    let mut version_spec_response = reqwest::get(&version.url).unwrap();
+    let version_spec_response = reqwest::get(&version.url).await.unwrap();
     let version_spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
     let mut version_spec_file = File::create(&version_spec_path).unwrap();
     // Copy text to string first so that I can use it again
-    let version_spec_json = version_spec_response.text().unwrap();
+    let version_spec_json = version_spec_response.text().await.unwrap();
     version_spec_file.write_all(version_spec_json.as_bytes()).unwrap();
 
     // Deserialize version spec
@@ -344,21 +348,22 @@ fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) 
 
     // Download Minecraft jar
     println!("Downloading Minecraft {0} jar", version.id);
-    download_minecraft_jar(minecraft_path, &version_spec);
+    download_minecraft_jar(minecraft_path, &version_spec).await;
     println!("Minecraft {0} jar downloaded", version.id);
 
     // Pass on the version spec
     return version_spec;
 }
 
-fn download_minecraft_jar(minecraft_path: &str, version: &VersionSpec) {
-    let mut minecraft_jar_response = reqwest::get(&version.downloads.client.url).unwrap();
+async fn download_minecraft_jar(minecraft_path: &str, version: &VersionSpec) {
+    let minecraft_jar_response = reqwest::get(&version.downloads.client.url).await.unwrap();
     let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
     let mut minecraft_jar_file = File::create(&minecraft_jar_path).unwrap();
-    io::copy(&mut minecraft_jar_response, &mut minecraft_jar_file).unwrap();
+    minecraft_jar_file.write_all(&minecraft_jar_response.bytes().await.unwrap()).unwrap();
 }
 
-fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
+async fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
+    let mut downloaders_vec = Vec::new();
     for library in version.libraries.iter() {
         // Check if library rules are satisfied and skip if not
         if library.rules.is_some() && !spec_rules_satisfied(library.rules.as_ref().unwrap()) {
@@ -372,8 +377,8 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             // Need as_ref before unwrapping the option so as to not consume it
             let download_artifact = library.downloads.artifact.as_ref().unwrap();
             let jar_path = download_artifact.path.as_ref().unwrap();
-            let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
-            let jar_path = Path::new(&jar_path);
+            let jar_path_str = format!("{0}/libraries/{1}", minecraft_path, jar_path);
+            let jar_path = Path::new(&jar_path_str);
             if check_file(jar_path, &download_artifact.sha1, download_artifact.size) {
                 println!("Library {0} already exists", library.name);
             }
@@ -384,9 +389,7 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
                 fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
 
                 // Download the jar
-                let mut library_response = reqwest::get(&download_artifact.url).unwrap();
-                let mut library_jar = File::create(jar_path).unwrap();
-                io::copy(&mut library_response, &mut library_jar).unwrap();
+                downloaders_vec.push(download_to_file(jar_path_str, download_artifact.url.clone(), format!("Library {0}", library.name)));
             }
         }
 
@@ -405,8 +408,8 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
             // TODO: Classifier name could have variable substitution inside, ie "windows-${arch}", get that working
             let native_classifier = library.downloads.classifiers.as_ref().unwrap().get(classifier_name.unwrap()).unwrap();
             let jar_path = native_classifier.path.as_ref().unwrap();
-            let jar_path = format!("{0}/libraries/{1}", minecraft_path, jar_path);
-            let jar_path = Path::new(&jar_path);
+            let jar_path_str = format!("{0}/libraries/{1}", minecraft_path, jar_path);
+            let jar_path = Path::new(&jar_path_str);
             if check_file(jar_path, &native_classifier.sha1, native_classifier.size) {
                 println!("Native for {0} already exists", library.name);
             }
@@ -417,16 +420,21 @@ fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {
                 fs::create_dir_all(jar_path.parent().unwrap()).unwrap();
 
                 // Download the jar
-                let mut native_response = reqwest::get(&native_classifier.url).unwrap();
-                let mut native_jar = File::create(jar_path).unwrap();
-                io::copy(&mut native_response, &mut native_jar).unwrap();
+                downloaders_vec.push(download_to_file(jar_path_str, native_classifier.url.clone(), format!("Native for {0}", library.name)));
             }
         }
+    }
+
+    // Poll all downloaders until all downloads are finished
+    // Maximum of 25 downloads at a time since too many downloads causes a panic
+    let mut downloaders = stream::iter(downloaders_vec).map(|func| async { func.await }).buffer_unordered(25);
+    while let Some(id) = downloaders.next().await {
+        println!("{0} downloaded", id);
     }
     println!("All libraries checked and downloaded");
 }
 
-fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
+async fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     let index_path = format!("{0}/assets/indexes/{1}.json", minecraft_path, version.assets);
     let index_path = Path::new(&index_path);
     let mut index_json = String::new();
@@ -444,9 +452,9 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
         fs::create_dir_all(index_path.parent().unwrap()).unwrap();
 
         // Download the asset index
-        let mut index_response = reqwest::get(&version.asset_index.url).unwrap();
+        let index_response = reqwest::get(&version.asset_index.url).await.unwrap();
         let mut index_file = File::create(index_path).unwrap();
-        index_json = index_response.text().unwrap();
+        index_json = index_response.text().await.unwrap();
         index_file.write_all(index_json.as_bytes()).unwrap();
     }
 
@@ -454,9 +462,10 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     let asset_index: AssetIndex = serde_json::from_str(&index_json).unwrap();
 
     // Check and download all assets
-    for (asset_name, asset_object) in asset_index.objects {
-        let asset_path = format!("{0}/assets/objects/{1}/{2}", minecraft_path, &asset_object.hash[..2], asset_object.hash);
-        let asset_path = Path::new(&asset_path);
+    let mut downloaders_vec = Vec::new();
+    for (asset_name, asset_object) in &asset_index.objects {
+        let asset_path_str = format!("{0}/assets/objects/{1}/{2}", minecraft_path, &asset_object.hash[..2], asset_object.hash);
+        let asset_path = Path::new(&asset_path_str);
 
         if check_file(asset_path, &asset_object.hash, asset_object.size) {
             println!("Asset {0} already exists", asset_name);
@@ -469,10 +478,21 @@ fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
 
             // Download the asset
             let asset_url = format!("http://resources.download.minecraft.net/{0}/{1}", &asset_object.hash[..2], asset_object.hash);
-            let mut asset_response = reqwest::get(&asset_url).unwrap();
-            let mut asset_file = File::create(asset_path).unwrap();
-            io::copy(&mut asset_response, &mut asset_file).unwrap();
+            downloaders_vec.push(download_to_file(asset_path_str, asset_url, asset_name.to_string()));
         }
+    }
+
+    // Poll all downloaders until all downloads are finished
+    // Maximum of 25 downloads at a time since too many downloads causes a panic
+    let mut downloaders = stream::iter(downloaders_vec).map(|func| async { func.await }).buffer_unordered(25);
+    while let Some(id) = downloaders.next().await {
+        println!("Asset {0} downloaded", id);
+    }
+
+    // Copy assets to appropriate directories if needed
+    for (asset_name, asset_object) in &asset_index.objects {
+        let asset_path = format!("{0}/assets/objects/{1}/{2}", minecraft_path, &asset_object.hash[..2], asset_object.hash);
+        let asset_path = Path::new(&asset_path);
 
         // Copy to either virtual or resources for older versions
         if asset_index.virtual_assets == Some(true) {
