@@ -147,6 +147,13 @@ struct Library {
     rules: Option<Vec<Rule>>,
 }
 
+#[derive(Deserialize)]
+struct JavaVersion {
+    component: String,
+    #[serde(rename="majorVersion")]
+    major_version: u8,
+}
+
 // TODO: Properly fill out the entire spec struct
 #[derive(Deserialize)]
 struct VersionSpec {
@@ -156,6 +163,8 @@ struct VersionSpec {
     assets: String,
     downloads: VersionDownloads,
     id: String,
+    #[serde(rename="javaVersion")]
+    java_version: Option<JavaVersion>,
     libraries: Vec<Library>,
     #[serde(rename="mainClass")]
     main_class: String,
@@ -193,12 +202,6 @@ async fn main() -> iced::Result {
     env.set("auth_access_token", "");
     env.set("user_type", "offline"); // For later, I assume this variable is whether it is a Mojang or Microsoft account, since for my game it launches as mojang
 
-    // Check for java installation for the current platform
-    if !Path::new(&format!("{0}/runtime/{1}-{2}/", minecraft_path, get_os(), get_arch())).exists() {
-        println!("Java installation not found");
-        download_java(minecraft_path).await;
-    }
-
     // Get list of Minecraft versions
     let minecraft_versions_response = reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json").await.unwrap();
     let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_response.text().await.unwrap()).unwrap();
@@ -211,11 +214,11 @@ async fn main() -> iced::Result {
     GUI::run(settings)
 }
 
-async fn download_java(save_path: &str) {
+async fn download_java(save_path: &str, version: u8) {
     // Download Java runtime
-    println!("Downloading Java for {0}-{1}", get_os(), get_arch());
+    println!("Downloading Java {0} for {1}-{2}", version, get_os(), get_arch());
     // TODO: Java version depending on minecraft version
-    let java_url = format!("https://api.adoptopenjdk.net/v3/binary/version/jdk8u282-b08/{0}/{1}/jre/hotspot/normal/adoptopenjdk", get_os_java(), get_arch_java());
+    let java_url = format!("https://api.adoptopenjdk.net/v3/binary/latest/{0}/ga/{1}/{2}/jre/hotspot/normal/adoptopenjdk", version, get_os_java(), get_arch_java());
     let response = reqwest::get(&java_url).await.unwrap();
 
     // Extract Java runtime to tempdir
@@ -231,9 +234,10 @@ async fn download_java(save_path: &str) {
         let mut archive = Archive::new(GzDecoder::new(response.bytes().await.unwrap().reader()));
         archive.unpack(extract_dir.path()).unwrap();
     }
+    let version_folder = fs::read_dir(&extract_dir).unwrap().next().unwrap().unwrap().path();
 
     // Move JRE directory to "{save-path}/runtime/{os}-{arch}/"
-    let runtime_dir = format!("{0}/runtime/{1}-{2}/", save_path, get_os(), get_arch());
+    let runtime_dir = format!("{0}/runtime/java{1}-{2}-{3}/", save_path, version, get_os(), get_arch());
     // Create runtime folder if it doesn't exist
     if !Path::new(&format!("{0}/runtime/", save_path)).exists() {
         fs::create_dir_all(&format!("{0}/runtime/", save_path)).unwrap();
@@ -242,9 +246,9 @@ async fn download_java(save_path: &str) {
         // fs::rename doesn't work across drive letters, so I manually copy every file to move the folder
         // Don't need to worry about deleting the files because they're in a tempdir that gets automatically removed
         fs::create_dir(&runtime_dir).unwrap();
-        for entry in WalkDir::new(extract_dir.path().join("jdk8u282-b08-jre")).min_depth(1) {
+        for entry in WalkDir::new(&version_folder).min_depth(1) {
             let entry = entry.unwrap();
-            let unprefixed_entry = entry.path().strip_prefix(extract_dir.path().join("jdk8u282-b08-jre")).unwrap();
+            let unprefixed_entry = entry.path().strip_prefix(&version_folder).unwrap();
             if entry.path().is_dir() {
                 fs::create_dir(Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
             }
@@ -255,13 +259,13 @@ async fn download_java(save_path: &str) {
     }
     else if get_os() == "macos" {
         // Mac OS X has a weird JRE file structure compared to Windows/Linux
-        fs::rename(extract_dir.path().join("jdk8u282-b08-jre/Contents/Home"), &runtime_dir).unwrap();
-        fs::rename(extract_dir.path().join("jdk8u282-b08-jre/Contents/MacOS/libjli.dylib"), Path::new(&runtime_dir).join("bin/libjli.dylib")).unwrap();
+        fs::rename(version_folder.join("Contents/Home"), &runtime_dir).unwrap();
+        fs::rename(version_folder.join("Contents/MacOS/libjli.dylib"), Path::new(&runtime_dir).join("bin/libjli.dylib")).unwrap();
     }
     else if get_os() == "linux" {
-        fs::rename(extract_dir.path().join("jdk8u282-b08-jre"), &runtime_dir).unwrap();
+        fs::rename(version_folder, &runtime_dir).unwrap();
     }
-    println!("Java extracted to runtime/{0}-{1}/", get_os(), get_arch());
+    println!("Java extracted to runtime/java{0}-{1}-{2}/", version, get_os(), get_arch());
 }
 
 async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVersion, env: Arc<Mutex<Environment>>) -> ExitStatus {
@@ -279,6 +283,20 @@ async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVers
     let game_assets = format!("{0}/assets/virtual/{1}/", minecraft_path, &version_spec.assets);
     env.set("game_assets", &game_assets);
 
+    let java_version;
+    if let Some(v) = &version_spec.java_version {
+        java_version = v.major_version;
+    }
+    else {
+        java_version = 8;
+    }
+
+    // Check for java installation for the current platform
+    if !Path::new(&format!("{0}/runtime/java{1}-{2}-{3}/", minecraft_path, java_version, get_os(), get_arch())).exists() {
+        println!("Java installation not found");
+        download_java(&minecraft_path, java_version).await;
+    }
+
     // Check for necessary libraries
     check_minecraft_libraries(&minecraft_path, &version_spec).await;
 
@@ -294,7 +312,7 @@ async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVers
 
     // Run Minecraft
     println!("Launching Minecraft {0}", version.id);
-    let mut java_process = Command::new(format!("{0}/runtime/{1}-{2}/bin/java", minecraft_path, get_os(), get_arch()));
+    let mut java_process = Command::new(format!("{0}/runtime/java{1}-{2}-{3}/bin/java", minecraft_path, java_version, get_os(), get_arch()));
     java_process.args(launch_args);
     let status = java_process.status().await.unwrap();
     println!("Minecraft exited with {0}", status);
