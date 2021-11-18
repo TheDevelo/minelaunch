@@ -188,7 +188,6 @@ struct AssetIndex {
 async fn download_java(save_path: &str, version: u8) {
     // Download Java runtime
     println!("Downloading Java {0} for {1}-{2}", version, get_os(), get_arch());
-    // TODO: Java version depending on minecraft version
     let java_url = format!("https://api.adoptopenjdk.net/v3/binary/latest/{0}/ga/{1}/{2}/jre/hotspot/normal/adoptopenjdk", version, get_os_java(), get_arch_java());
     let response = reqwest::get(&java_url).await.unwrap();
 
@@ -239,8 +238,8 @@ async fn download_java(save_path: &str, version: u8) {
     println!("Java extracted to runtime/java{0}-{1}-{2}/", version, get_os(), get_arch());
 }
 
-pub async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVersion, env: Arc<Mutex<Environment>>) -> ExitStatus {
-    let mut env = env.lock().await;
+pub async fn launch_minecraft_version(minecraft_path: String, version: MinecraftVersion, env: Box<Environment>) -> ExitStatus {
+    let mut env = *env;
 
     // Get the version spec for the specified version
     // Downloads minecraft if that version doesn't exist
@@ -277,9 +276,6 @@ pub async fn launch_minecraft_version(minecraft_path: String, version: Minecraft
     // Construct Launch Arguments
     let natives_dir = tempdir().unwrap();
     let launch_args = construct_launch_args(&minecraft_path, &version_spec, &mut env, &natives_dir);
-
-    // Drop mutex since we no longer need it
-    drop(env);
 
     // Run Minecraft
     println!("Launching Minecraft {0}", version.id);

@@ -2,12 +2,10 @@ mod minecraft;
 mod env;
 mod util;
 
-use std::sync::Arc;
 use std::process::ExitStatus;
 use std::time::Duration;
-use iced::{Align, Application, Button, Clipboard, Column, Command, Container, Element, Length, PickList, Settings, Space, Subscription, Text, TextInput};
+use iced::{Align, Application, Button, Clipboard, Column, Command, Container, Element, Length, PickList, Row, Settings, Space, Subscription, Text, TextInput};
 use iced::{button, executor, pick_list, text_input, time, window};
-use async_std::sync::Mutex;
 use async_std::task;
 
 use minecraft::{MinecraftVersionList, MinecraftVersion, launch_minecraft_version};
@@ -28,7 +26,7 @@ fn main() -> iced::Result {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VersionSelection {
+enum VersionSelection {
     Latest(String),
     LatestSnapshot(String),
     Version(MinecraftVersion),
@@ -55,28 +53,32 @@ impl std::fmt::Display for VersionSelection {
     }
 }
 
-pub struct GUI {
+struct ApplicationState {
     launcher_path: String,
     versions: MinecraftVersionList,
-    selected_version: VersionSelection,
-    env: Arc<Mutex<Environment>>,
-    last_exit_status: Option<ExitStatus>,
-    username: String,
+    env: Environment,
+}
 
-    check_env: bool,
+enum Tab {
+    Launcher,
+    Downloader,
+}
 
-    launch_button_state: button::State,
-    version_dropdown_state: pick_list::State<VersionSelection>,
-    username_input_state: text_input::State,
+struct GUI {
+    state: ApplicationState,
+    tab: Tab,
+    launcher_tab: Launcher,
+    downloader_tab: Downloader,
+
+    launcher_button_state: button::State,
+    downloader_button_state: button::State,
 }
 
 #[derive(Debug, Clone)]
-pub enum Message {
-    LaunchPressed,
-    VersionSelected(VersionSelection),
-    UsernameChanged(String),
-    CheckEnv,
-    MinecraftExited(ExitStatus),
+enum Message {
+    LauncherPressed,
+    DownloaderPressed,
+    LauncherMessage(LauncherMessage),
 }
 
 impl Application for GUI {
@@ -100,21 +102,22 @@ impl Application for GUI {
         let minecraft_versions_text = task::block_on(minecraft_versions_response.text()).unwrap();
         let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_text).unwrap();
 
-        let state = Self {
+        let state = ApplicationState {
             launcher_path: minecraft_path.to_string(),
-            selected_version: VersionSelection::Latest(minecraft_versions.latest.release.clone()),
             versions: minecraft_versions,
-            env: Arc::new(Mutex::new(env)),
-            last_exit_status: None,
-            username: String::from(""),
-
-            check_env: false,
-
-            launch_button_state: button::State::default(),
-            version_dropdown_state: pick_list::State::default(),
-            username_input_state: text_input::State::default(),
+            env: env,
         };
-        return (state, Command::none());
+
+        let gui_state = Self {
+            tab: Tab::Launcher,
+            launcher_tab: Launcher::new(&state),
+            downloader_tab: Downloader {},
+            state: state,
+
+            launcher_button_state: button::State::default(),
+            downloader_button_state: button::State::default(),
+        };
+        return (gui_state, Command::none());
     }
 
     fn title(&self) -> String {
@@ -129,25 +132,23 @@ impl Application for GUI {
             .push(Text::new(format!("Version {0}", env!("CARGO_PKG_VERSION"))))
             .push(Space::with_height(Length::Units(10)))
             .push(
-                PickList::new(&mut self.version_dropdown_state, VersionSelection::make_list(&self.versions),
-                              Some(self.selected_version.clone()), Message::VersionSelected)
-            ).push(Space::with_height(Length::Units(10)))
-            .push(Text::new("Username:"))
-            .push(
-                TextInput::new(&mut self.username_input_state, "Enter your username...", &self.username, Message::UsernameChanged)
-                .padding(5)
-                .width(Length::Units(286))
-            ).push(Space::with_height(Length::FillPortion(1)));
+                Row::new()
+                .push(
+                    Button::new(&mut self.launcher_button_state, Text::new("Launcher"))
+                        .on_press(Message::LauncherPressed)
+                ).push(Space::with_width(Length::Units(20)))
+                .push(
+                    Button::new(&mut self.downloader_button_state, Text::new("Downloader"))
+                        .on_press(Message::DownloaderPressed)
+            )).push(Space::with_height(Length::Units(10)));
 
-        if self.last_exit_status.is_some() {
-            content = content.push(Text::new(format!("Minecraft exited with {0}", self.last_exit_status.unwrap())));
+        match self.tab {
+            Tab::Launcher => {
+                content = content.push(self.launcher_tab.view(&self.state));
+            }
+            Tab::Downloader => {
+            }
         }
-
-        content = content.push(Space::with_height(Length::FillPortion(1)))
-            .push(
-                Button::new(&mut self.launch_button_state, Text::new("Launch"))
-                    .on_press(Message::LaunchPressed)
-            ).push(Space::with_height(Length::Units(10)));
 
         return Container::new(content)
             .width(Length::Fill)
@@ -159,13 +160,92 @@ impl Application for GUI {
 
     fn update(&mut self, message: Message, _clipboard: &mut Clipboard) -> Command<Message> {
         match message {
-            Message::LaunchPressed => {
+            Message::LauncherPressed => {
+                self.tab = Tab::Launcher;
+            },
+            Message::DownloaderPressed => {
+                self.tab = Tab::Downloader;
+            },
+            Message::LauncherMessage(launcher_msg) => {
+                return self.launcher_tab.update(&mut self.state, launcher_msg);
+            }
+        }
+        return Command::none();
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        return Subscription::none();
+    }
+}
+
+#[derive(Debug, Clone)]
+enum LauncherMessage {
+    LaunchPressed,
+    VersionSelected(VersionSelection),
+    UsernameChanged(String),
+    MinecraftExited(ExitStatus),
+}
+
+struct Launcher {
+    selected_version: VersionSelection,
+    last_exit_status: Option<ExitStatus>,
+    username: String,
+
+    launch_button_state: button::State,
+    version_dropdown_state: pick_list::State<VersionSelection>,
+    username_input_state: text_input::State,
+}
+
+impl Launcher {
+    fn new(state: &ApplicationState) -> Self {
+        Launcher {
+            selected_version: VersionSelection::Latest(state.versions.latest.release.clone()),
+            last_exit_status: None,
+            username: String::from(""),
+
+            launch_button_state: button::State::default(),
+            version_dropdown_state: pick_list::State::default(),
+            username_input_state: text_input::State::default(),
+        }
+    }
+
+    fn view(&mut self, state: &ApplicationState) -> Element<Message> {
+        let mut content = Column::new()
+            .align_items(Align::Center)
+            .push(
+                PickList::new(&mut self.version_dropdown_state, VersionSelection::make_list(&state.versions), Some(self.selected_version.clone()),
+                              move |v| { Message::LauncherMessage(LauncherMessage::VersionSelected(v)) })
+            ).push(Space::with_height(Length::Units(10)))
+            .push(Text::new("Username:"))
+            .push(
+                TextInput::new(&mut self.username_input_state, "Enter your username...", &self.username,
+                               move |s| { Message::LauncherMessage(LauncherMessage::UsernameChanged(s)) })
+                .padding(5)
+                .width(Length::Units(286))
+            ).push(Space::with_height(Length::FillPortion(1)));
+
+        if self.last_exit_status.is_some() {
+            content = content.push(Text::new(format!("Minecraft exited with {0}", self.last_exit_status.unwrap())));
+        }
+
+        content = content.push(Space::with_height(Length::FillPortion(1)))
+            .push(
+                Button::new(&mut self.launch_button_state, Text::new("Launch"))
+                    .on_press(Message::LauncherMessage(LauncherMessage::LaunchPressed))
+            ).push(Space::with_height(Length::Units(10)));
+
+        return content.into();
+    }
+
+    fn update(&mut self, state: &mut ApplicationState, message: LauncherMessage) -> Command<Message> {
+        match message {
+            LauncherMessage::LaunchPressed => {
                 self.last_exit_status = None;
 
-                let mut version = self.versions.versions.get(0).unwrap();
+                let mut version = state.versions.versions.get(0).unwrap();
                 match &self.selected_version {
                     VersionSelection::Latest(id) => {
-                        for v in self.versions.versions.iter() {
+                        for v in state.versions.versions.iter() {
                             if v.id == *id {
                                 version = v;
                                 break;
@@ -173,7 +253,7 @@ impl Application for GUI {
                         }
                     },
                     VersionSelection::LatestSnapshot(id) => {
-                        for v in self.versions.versions.iter() {
+                        for v in state.versions.versions.iter() {
                             if v.id == *id {
                                 version = v;
                                 break;
@@ -183,35 +263,23 @@ impl Application for GUI {
                     VersionSelection::Version(v) => { version = &v; },
                 };
 
-                return Command::perform(launch_minecraft_version(self.launcher_path.clone(), version.clone(), self.env.clone()),
-                                        move |s| { Message::MinecraftExited(s) });
+                return Command::perform(launch_minecraft_version(state.launcher_path.clone(), version.clone(), Box::new(state.env.clone())),
+                                        move |s| { Message::LauncherMessage(LauncherMessage::MinecraftExited(s)) });
             },
-            Message::VersionSelected(version) => {
+            LauncherMessage::VersionSelected(version) => {
                 self.selected_version = version;
             },
-            Message::UsernameChanged(username) => {
+            LauncherMessage::UsernameChanged(username) => {
                 self.username = username;
-                self.check_env = true;
+                state.env.set("auth_player_name", &self.username);
             }
-            Message::CheckEnv => {
-                let env = self.env.try_lock();
-                if env.is_some() {
-                    let mut env = env.unwrap();
-                    env.set("auth_player_name", &self.username);
-                    self.check_env = false;
-                }
-            }
-            Message::MinecraftExited(status) => {
+            LauncherMessage::MinecraftExited(status) => {
                 self.last_exit_status = Some(status);
             }
         }
         return Command::none();
     }
+}
 
-    fn subscription(&self) -> Subscription<Message> {
-        if self.check_env {
-            return time::every(Duration::from_millis(10)).map(|_| { Message::CheckEnv });
-        }
-        return Subscription::none();
-    }
+struct Downloader {
 }

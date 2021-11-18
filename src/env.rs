@@ -7,6 +7,7 @@ lazy_static! {
     static ref REPLACEMENT_REGEX: Regex = Regex::new(r"\$\{([^\}]*)\}").unwrap();
 }
 
+#[derive(Clone)]
 pub struct Environment {
     map: BTreeMap<String, String>,
 }
