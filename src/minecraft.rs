@@ -187,8 +187,15 @@ struct AssetIndex {
 
 async fn download_java(save_path: &str, version: u8) {
     // Download Java runtime
+    // Need to download JRE for Java 8, JDK for Java 16+ and then jlink
     println!("Downloading Java {0} for {1}-{2}", version, get_os(), get_arch());
-    let java_url = format!("https://api.adoptopenjdk.net/v3/binary/latest/{0}/ga/{1}/{2}/jre/hotspot/normal/adoptopenjdk", version, get_os_java(), get_arch_java());
+    let java_url;
+    if version == 8 {
+        java_url = format!("https://api.adoptium.net/v3/binary/latest/8/ga/{0}/{1}/jre/hotspot/normal/eclipse", get_os_java(), get_arch_java());
+    }
+    else {
+        java_url = format!("https://api.adoptium.net/v3/binary/latest/{0}/ga/{1}/{2}/jdk/hotspot/normal/eclipse", version, get_os_java(), get_arch_java());
+    }
     let response = reqwest::get(&java_url).await.unwrap();
 
     // Extract Java runtime to tempdir
@@ -206,35 +213,57 @@ async fn download_java(save_path: &str, version: u8) {
     }
     let version_folder = fs::read_dir(&extract_dir).unwrap().next().unwrap().unwrap().path();
 
-    // Move JRE directory to "{save-path}/runtime/{os}-{arch}/"
+    // Move/Make JRE to "{save-path}/runtime/java{version}-{os}-{arch}/"
     let runtime_dir = format!("{0}/runtime/java{1}-{2}-{3}/", save_path, version, get_os(), get_arch());
     // Create runtime folder if it doesn't exist
     if !Path::new(&format!("{0}/runtime/", save_path)).exists() {
         fs::create_dir_all(&format!("{0}/runtime/", save_path)).unwrap();
     }
-    if get_os() == "windows" {
-        // fs::rename doesn't work across drive letters, so I manually copy every file to move the folder
-        // Don't need to worry about deleting the files because they're in a tempdir that gets automatically removed
-        fs::create_dir(&runtime_dir).unwrap();
-        for entry in WalkDir::new(&version_folder).min_depth(1) {
-            let entry = entry.unwrap();
-            let unprefixed_entry = entry.path().strip_prefix(&version_folder).unwrap();
-            if entry.path().is_dir() {
-                fs::create_dir(Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
-            }
-            else if entry.path().is_file() {
-                fs::copy(entry.path(), Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
+    // Need to move JRE for Java 8
+    if version == 8 {
+        println!("Moving JRE to runtime folder");
+        if get_os() == "windows" {
+            // fs::rename doesn't work across drive letters, so I manually copy every file to move the folder
+            // Don't need to worry about deleting the files because they're in a tempdir that gets automatically removed
+            fs::create_dir(&runtime_dir).unwrap();
+            for entry in WalkDir::new(&version_folder).min_depth(1) {
+                let entry = entry.unwrap();
+                let unprefixed_entry = entry.path().strip_prefix(&version_folder).unwrap();
+                if entry.path().is_dir() {
+                    fs::create_dir(Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
+                }
+                else if entry.path().is_file() {
+                    fs::copy(entry.path(), Path::new(&runtime_dir).join(unprefixed_entry)).unwrap();
+                }
             }
         }
+        else if get_os() == "macos" {
+            // Mac OS X has a weird JRE file structure compared to Windows/Linux
+            fs::rename(version_folder.join("Contents/Home"), &runtime_dir).unwrap();
+            fs::rename(version_folder.join("Contents/MacOS/libjli.dylib"), Path::new(&runtime_dir).join("bin/libjli.dylib")).unwrap();
+        }
+        else if get_os() == "linux" {
+            fs::rename(version_folder, &runtime_dir).unwrap();
+        }
     }
-    else if get_os() == "macos" {
-        // Mac OS X has a weird JRE file structure compared to Windows/Linux
-        fs::rename(version_folder.join("Contents/Home"), &runtime_dir).unwrap();
-        fs::rename(version_folder.join("Contents/MacOS/libjli.dylib"), Path::new(&runtime_dir).join("bin/libjli.dylib")).unwrap();
+    // Need to jlink the JDK to create the JRE for Java 16+
+    else {
+        println!("Creating JRE using jlink");
+        let jlink_path;
+        if get_os() == "macos" {
+            // Mac OS X has a weird JRE file structure compared to Windows/Linux
+            jlink_path = version_folder.join("Contents/Home/bin/jlink")
+        }
+        else {
+            jlink_path = version_folder.join("bin/jlink")
+        }
+        let mut jlink_process = Command::new(jlink_path);
+        jlink_process.args(vec!["--add-modules", "ALL-MODULE-PATH", "--output", &runtime_dir,
+                                "--strip-debug", "--no-man-pages", "--no-header-files", "--compress=2"]);
+        let status = jlink_process.status().await.unwrap();
+        println!("jlink exited with {0}", status);
     }
-    else if get_os() == "linux" {
-        fs::rename(version_folder, &runtime_dir).unwrap();
-    }
+
     println!("Java extracted to runtime/java{0}-{1}-{2}/", version, get_os(), get_arch());
 }
 
