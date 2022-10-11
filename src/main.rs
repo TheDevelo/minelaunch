@@ -4,7 +4,7 @@ mod util;
 
 use std::process::ExitStatus;
 use std::time::Duration;
-use iced::{Align, Application, Button, Clipboard, Column, Command, Container, Element, Length, PickList, Row, Settings, Space, Subscription, Text, TextInput};
+use iced::{Alignment, Application, Button, Column, Command, Container, Element, Length, PickList, Row, Settings, Space, Subscription, Text, TextInput};
 use iced::{button, executor, pick_list, text_input, time, window};
 use async_std::task;
 
@@ -126,7 +126,7 @@ impl Application for GUI {
 
     fn view(&mut self) -> Element<Message> {
         let mut content = Column::new()
-            .align_items(Align::Center)
+            .align_items(Alignment::Center)
             .push(Space::with_height(Length::Units(10)))
             .push(Text::new("Minelaunch"))
             .push(Text::new(format!("Version {0}", env!("CARGO_PKG_VERSION"))))
@@ -158,7 +158,7 @@ impl Application for GUI {
             .into();
     }
 
-    fn update(&mut self, message: Message, _clipboard: &mut Clipboard) -> Command<Message> {
+    fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::LauncherPressed => {
                 self.tab = Tab::Launcher;
@@ -211,7 +211,7 @@ impl Launcher {
 
     fn view(&mut self, state: &ApplicationState) -> Element<Message> {
         let mut content = Column::new()
-            .align_items(Align::Center)
+            .align_items(Alignment::Center)
             .push(
                 PickList::new(&mut self.version_dropdown_state, VersionSelection::make_list(&state.versions), Some(self.selected_version.clone()),
                               move |v| { Message::LauncherMessage(LauncherMessage::VersionSelected(v)) })
