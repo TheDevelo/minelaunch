@@ -1,17 +1,15 @@
 use flate2::read::GzDecoder;
 use tar::Archive;
 use zip::read::ZipArchive;
-use tempfile::{tempfile, tempdir, TempDir};
+use tempfile::{tempfile, tempdir};
 use walkdir::WalkDir;
 use std::path::Path;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::collections::BTreeMap;
 use std::process::ExitStatus;
-use std::sync::Arc;
 use serde::Deserialize;
 use async_std::process::Command;
-use async_std::sync::Mutex;
 use bytes::Buf;
 use futures::stream::{self, StreamExt};
 
@@ -304,7 +302,8 @@ pub async fn launch_minecraft_version(minecraft_path: String, version: Minecraft
 
     // Construct Launch Arguments
     let natives_dir = tempdir().unwrap();
-    let launch_args = construct_launch_args(&minecraft_path, &version_spec, &mut env, &natives_dir);
+    let natives_path = natives_dir.path().to_str().unwrap();
+    let launch_args = construct_launch_args(&minecraft_path, &version_spec, &mut env, natives_path);
 
     // Run Minecraft
     println!("Launching Minecraft {0}", version.id);
@@ -548,7 +547,7 @@ async fn check_minecraft_assets(minecraft_path: &str, version: &VersionSpec) {
     println!("All assets checked and downloaded");
 }
 
-fn construct_launch_args(minecraft_path: &str, version: &VersionSpec, env: &mut Environment, natives_dir: &TempDir) -> Vec<String> {
+fn construct_launch_args(minecraft_path: &str, version: &VersionSpec, env: &mut Environment, natives_dir: &str) -> Vec<String> {
     // Construct classpath and natives directory
     // TODO: Move classpath construction to library
     let mut classpath = String::new();
@@ -597,14 +596,14 @@ fn construct_launch_args(minecraft_path: &str, version: &VersionSpec, env: &mut 
             // Extract into the natives directory
             let natives_jar = File::open(jar_path).unwrap();
             let mut archive = ZipArchive::new(natives_jar).unwrap();
-            archive.extract(natives_dir.path()).unwrap();
+            archive.extract(natives_dir).unwrap();
             println!("Extracted native for {0}", library.name);
         }
     }
     let jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
     classpath += &jar_path; // Don't forget to add the Minecraft jar itself
     env.set("classpath", &classpath);
-    env.set("natives_directory", natives_dir.path().to_str().unwrap());
+    env.set("natives_directory", natives_dir);
 
     // Construct the launch arguments
     let mut launch_args = Vec::<String>::new();
