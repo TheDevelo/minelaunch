@@ -280,6 +280,9 @@ pub async fn launch_minecraft_version(minecraft_path: String, version: Minecraft
     let game_assets = format!("{0}/assets/virtual/{1}/", minecraft_path, &version_spec.assets);
     env.set("game_assets", &game_assets);
 
+    // Check for requirements
+    check_requirements(&minecraft_path, &version_spec).await;
+
     let java_version;
     if let Some(v) = &version_spec.java_version {
         java_version = v.major_version;
@@ -287,18 +290,6 @@ pub async fn launch_minecraft_version(minecraft_path: String, version: Minecraft
     else {
         java_version = 8;
     }
-
-    // Check for java installation for the current platform
-    if !Path::new(&format!("{0}/runtime/java{1}-{2}-{3}/", minecraft_path, java_version, get_os(), get_arch())).exists() {
-        println!("Java installation not found");
-        download_java(&minecraft_path, java_version).await;
-    }
-
-    // Check for necessary libraries
-    check_minecraft_libraries(&minecraft_path, &version_spec).await;
-
-    // Check for necessary assets
-    check_minecraft_assets(&minecraft_path, &version_spec).await;
 
     // Construct Launch Arguments
     let natives_dir = tempdir().unwrap();
@@ -317,31 +308,31 @@ pub async fn launch_minecraft_version(minecraft_path: String, version: Minecraft
 async fn get_version_spec(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
     // Check if the minecraft version is actually downloaded
     let spec_path = format!("{0}/versions/{1}/{1}.json", minecraft_path, version.id);
-    if Path::new(&spec_path).exists() {
-        // TODO: Check sha1 of the spec file
-        let mut spec_file = File::open(spec_path).unwrap();
-        let mut spec_json = String::new();
-        spec_file.read_to_string(&mut spec_json).unwrap();
-        let spec: VersionSpec = serde_json::from_str(&spec_json).unwrap();
-
-        // Check if the Minecraft jar is damaged
-        let jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
-        let jar_path = Path::new(&jar_path);
-        if !check_file(jar_path, &spec.downloads.client.sha1, spec.downloads.client.size) {
-            println!("Minecraft {0} jar damaged, downloading", version.id);
-            download_minecraft_jar(minecraft_path, &spec).await;
-            println!("Minecraft {0} jar downloaded", version.id);
-        }
-
-        return spec;
-    }
-    else {
+    if !Path::new(&spec_path).exists() {
+        // Download version if it does not exist
         println!("Minecraft {0} spec not found", version.id);
-        return download_minecraft_version(minecraft_path, version).await;
+        download_minecraft_version(minecraft_path.to_string(), version.clone()).await;
     }
+
+    // TODO: Check sha1 of the spec file
+    let mut spec_file = File::open(spec_path).unwrap();
+    let mut spec_json = String::new();
+    spec_file.read_to_string(&mut spec_json).unwrap();
+    let spec: VersionSpec = serde_json::from_str(&spec_json).unwrap();
+
+    // Check if the Minecraft jar is damaged
+    let jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
+    let jar_path = Path::new(&jar_path);
+    if !check_file(jar_path, &spec.downloads.client.sha1, spec.downloads.client.size) {
+        println!("Minecraft {0} jar damaged, downloading", version.id);
+        download_minecraft_jar(minecraft_path, &spec).await;
+        println!("Minecraft {0} jar downloaded", version.id);
+    }
+
+    return spec;
 }
 
-async fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVersion) -> VersionSpec {
+pub async fn download_minecraft_version(minecraft_path: String, version: MinecraftVersion) -> String {
     // Create version folder if it doesn't exist
     if !Path::new(&format!("{0}/versions/{1}/", minecraft_path, version.id)).exists() {
         fs::create_dir_all(&format!("{0}/versions/{1}", minecraft_path, version.id)).unwrap();
@@ -361,11 +352,14 @@ async fn download_minecraft_version(minecraft_path: &str, version: &MinecraftVer
 
     // Download Minecraft jar
     println!("Downloading Minecraft {0} jar", version.id);
-    download_minecraft_jar(minecraft_path, &version_spec).await;
+    download_minecraft_jar(&minecraft_path, &version_spec).await;
     println!("Minecraft {0} jar downloaded", version.id);
 
-    // Pass on the version spec
-    return version_spec;
+    // Check for requirements
+    check_requirements(&minecraft_path, &version_spec).await;
+
+    // Pass on the id (for the downloader tab)
+    return version_spec.id.clone();
 }
 
 async fn download_minecraft_jar(minecraft_path: &str, version: &VersionSpec) {
@@ -373,6 +367,28 @@ async fn download_minecraft_jar(minecraft_path: &str, version: &VersionSpec) {
     let minecraft_jar_path = format!("{0}/versions/{1}/{1}.jar", minecraft_path, version.id);
     let mut minecraft_jar_file = File::create(&minecraft_jar_path).unwrap();
     minecraft_jar_file.write_all(&minecraft_jar_response.bytes().await.unwrap()).unwrap();
+}
+
+async fn check_requirements(minecraft_path: &str, version: &VersionSpec) {
+    let java_version;
+    if let Some(v) = &version.java_version {
+        java_version = v.major_version;
+    }
+    else {
+        java_version = 8;
+    }
+
+    // Check for java installation for the current platform
+    if !Path::new(&format!("{0}/runtime/java{1}-{2}-{3}/", minecraft_path, java_version, get_os(), get_arch())).exists() {
+        println!("Java installation not found");
+        download_java(minecraft_path, java_version).await;
+    }
+
+    // Check for necessary libraries
+    check_minecraft_libraries(minecraft_path, version).await;
+
+    // Check for necessary assets
+    check_minecraft_assets(minecraft_path, version).await;
 }
 
 async fn check_minecraft_libraries(minecraft_path: &str, version: &VersionSpec) {

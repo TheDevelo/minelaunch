@@ -3,12 +3,11 @@ mod env;
 mod util;
 
 use std::process::ExitStatus;
-use std::time::Duration;
 use iced::{Alignment, Application, Button, Column, Command, Container, Element, Length, PickList, Row, Settings, Space, Subscription, Text, TextInput};
-use iced::{button, executor, pick_list, text_input, time, window};
+use iced::{button, executor, pick_list, text_input, window};
 use async_std::task;
 
-use minecraft::{MinecraftVersionList, MinecraftVersion, launch_minecraft_version};
+use minecraft::{MinecraftVersionList, MinecraftVersion, launch_minecraft_version, download_minecraft_version};
 use env::Environment;
 
 fn main() -> iced::Result {
@@ -79,6 +78,7 @@ enum Message {
     LauncherPressed,
     DownloaderPressed,
     LauncherMessage(LauncherMessage),
+    DownloaderMessage(DownloaderMessage),
 }
 
 impl Application for GUI {
@@ -98,7 +98,7 @@ impl Application for GUI {
         env.set("user_type", "offline"); // mojang for Mojang, msa for Microsoft
 
         // Get list of Minecraft versions
-        let minecraft_versions_response = task::block_on(reqwest::get("https://launchermeta.mojang.com/mc/game/version_manifest_v2.json")).unwrap();
+        let minecraft_versions_response = task::block_on(reqwest::get("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")).unwrap();
         let minecraft_versions_text = task::block_on(minecraft_versions_response.text()).unwrap();
         let minecraft_versions: MinecraftVersionList = serde_json::from_str(&minecraft_versions_text).unwrap();
 
@@ -111,7 +111,7 @@ impl Application for GUI {
         let gui_state = Self {
             tab: Tab::Launcher,
             launcher_tab: Launcher::new(&state),
-            downloader_tab: Downloader {},
+            downloader_tab: Downloader::new(&state),
             state: state,
 
             launcher_button_state: button::State::default(),
@@ -147,6 +147,7 @@ impl Application for GUI {
                 content = content.push(self.launcher_tab.view(&self.state));
             }
             Tab::Downloader => {
+                content = content.push(self.downloader_tab.view(&self.state));
             }
         }
 
@@ -168,7 +169,10 @@ impl Application for GUI {
             },
             Message::LauncherMessage(launcher_msg) => {
                 return self.launcher_tab.update(&mut self.state, launcher_msg);
-            }
+            },
+            Message::DownloaderMessage(downloader_msg) => {
+                return self.downloader_tab.update(&mut self.state, downloader_msg);
+            },
         }
         return Command::none();
     }
@@ -281,5 +285,86 @@ impl Launcher {
     }
 }
 
+#[derive(Debug, Clone)]
+enum DownloaderMessage {
+    VersionSelected(VersionSelection),
+    DownloadPressed,
+    DownloadFinished(String),
+}
+
 struct Downloader {
+    selected_version: VersionSelection,
+    last_downloaded_id: Option<String>,
+
+    version_dropdown_state: pick_list::State<VersionSelection>,
+    download_button_state: button::State,
+}
+
+impl Downloader {
+    fn new(state: &ApplicationState) -> Self {
+        Downloader {
+            selected_version: VersionSelection::Latest(state.versions.latest.release.clone()),
+            last_downloaded_id: None,
+
+            version_dropdown_state: pick_list::State::default(),
+            download_button_state: button::State::default(),
+        }
+    }
+
+    fn view(&mut self, state: &ApplicationState) -> Element<Message> {
+        let mut content = Column::new()
+            .align_items(Alignment::Center)
+            .push(
+                PickList::new(&mut self.version_dropdown_state, VersionSelection::make_list(&state.versions), Some(self.selected_version.clone()),
+                              move |v| { Message::DownloaderMessage(DownloaderMessage::VersionSelected(v)) })
+            ).push(Space::with_height(Length::FillPortion(1)));
+
+        if let Some(id) = &self.last_downloaded_id {
+            content = content.push(Text::new(format!("Version {0} finished downloading.", id)));
+        }
+
+        content = content.push(Space::with_height(Length::FillPortion(1)))
+            .push(
+                Button::new(&mut self.download_button_state, Text::new("Download"))
+                    .on_press(Message::DownloaderMessage(DownloaderMessage::DownloadPressed))
+            ).push(Space::with_height(Length::Units(10)));
+        return content.into();
+    }
+
+    fn update(&mut self, state: &mut ApplicationState, message: DownloaderMessage) -> Command<Message> {
+        match message {
+            DownloaderMessage::VersionSelected(version) => {
+                self.selected_version = version;
+            },
+            DownloaderMessage::DownloadPressed => {
+                let mut version = state.versions.versions.get(0).unwrap();
+                match &self.selected_version {
+                    VersionSelection::Latest(id) => {
+                        for v in state.versions.versions.iter() {
+                            if v.id == *id {
+                                version = v;
+                                break;
+                            }
+                        }
+                    },
+                    VersionSelection::LatestSnapshot(id) => {
+                        for v in state.versions.versions.iter() {
+                            if v.id == *id {
+                                version = v;
+                                break;
+                            }
+                        }
+                    },
+                    VersionSelection::Version(v) => { version = &v; },
+                };
+
+                return Command::perform(download_minecraft_version(state.launcher_path.clone(), version.clone()),
+                                        |v| { Message::DownloaderMessage(DownloaderMessage::DownloadFinished(v)) });
+            }
+            DownloaderMessage::DownloadFinished(id) => {
+                self.last_downloaded_id = Some(id)
+            }
+        }
+        return Command::none();
+    }
 }
